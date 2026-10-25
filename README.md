@@ -34,6 +34,18 @@ ARGO_PROTOCOL=http2 bash mihomo-lite.sh
 bash <(curl -Ls https://raw.githubusercontent.com/guanxi660-crypto/mihomo-lite/main/mihomo-lite.sh)
 ```
 
+raw.githubusercontent.com 直连不畅时，用镜像拉取脚本：
+
+```bash
+bash <(curl -Ls https://gh-proxy.com/https://raw.githubusercontent.com/guanxi660-crypto/mihomo-lite/main/mihomo-lite.sh)
+```
+
+核心下载失败（提示"直连与镜像均未获得有效压缩包"）时，可指定其他镜像前缀重试：
+
+```bash
+GH_PROXY=https://ghfast.top/ bash <(curl -Ls https://gh-proxy.com/https://raw.githubusercontent.com/guanxi660-crypto/mihomo-lite/main/mihomo-lite.sh)
+```
+
 ## 功能
 
 - 中文交互菜单：添加/删除节点、查看链接、重启/停止、状态、日志、卸载

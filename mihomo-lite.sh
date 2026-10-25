@@ -454,6 +454,19 @@ _detect_arch() {
 
 _fetch() { curl -LsSf --connect-timeout 15 --max-time 300 -o "$2" "$1"; }
 
+# 带镜像回退的下载：直连失败或产物不是有效 gzip 时自动换镜像重试
+# 可用环境变量 GH_PROXY 覆盖镜像前缀（默认 gh-proxy.com），如 GH_PROXY=https://ghfast.top/
+_fetch_gh() {
+  local url="$1" out="$2" mirror="${GH_PROXY:-https://gh-proxy.com/}"
+  rm -f "$out"
+  _fetch "$url" "$out" 2>/dev/null
+  if gzip -t "$out" 2>/dev/null; then return 0; fi
+  _warn "直连下载失败或产物损坏，尝试镜像: ${mirror}"
+  rm -f "$out"
+  _fetch "${mirror}${url}" "$out" 2>/dev/null
+  gzip -t "$out" 2>/dev/null
+}
+
 install_core() {
   local arch; arch=$(_detect_arch) || return 1
   _info "获取 mihomo 最新版本号..."
@@ -464,7 +477,12 @@ install_core() {
   local url="https://github.com/MetaCubeX/mihomo/releases/download/${tag}/${fname}"
   _info "下载 mihomo ${tag} (${arch})..."
   local tmp="${MIHOMO_DIR}/mihomo.dl.gz"
-  _fetch "$url" "$tmp" || { _error "下载 mihomo 失败: ${url}"; return 1; }
+  if ! _fetch_gh "$url" "$tmp"; then
+    _error "mihomo 下载失败：直连与镜像均未获得有效压缩包（可能被墙或链路劫持）。"
+    _info "可尝试: GH_PROXY=自定义镜像前缀 bash $0 重试。"
+    rm -f "$tmp"
+    return 1
+  fi
   gzip -dc "$tmp" > "${MIHOMO_BIN}.new" && rm -f "$tmp"
   chmod +x "${MIHOMO_BIN}.new"
   # 校验二进制真实可执行且版本正确
@@ -496,7 +514,20 @@ install_cloudflared() {
   local arch; arch=$(_detect_arch) || return 1
   _info "下载 cloudflared (${arch})..."
   local url="https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-${arch}"
-  _fetch "$url" "${CLOUDFLARED_BIN}.new" || { _error "下载 cloudflared 失败"; return 1; }
+  local mirror="${GH_PROXY:-https://gh-proxy.com/}"
+  rm -f "${CLOUDFLARED_BIN}.new"
+  _fetch "$url" "${CLOUDFLARED_BIN}.new" 2>/dev/null
+  # 完整性校验：ELF magic + 大于 10MB；失败换镜像重试
+  if ! { head -c 4 "${CLOUDFLARED_BIN}.new" 2>/dev/null | grep -q ELF && [ "$(stat -c%s "${CLOUDFLARED_BIN}.new" 2>/dev/null || echo 0)" -gt 10485760 ]; }; then
+    _warn "直连下载失败或产物损坏，尝试镜像: ${mirror}"
+    rm -f "${CLOUDFLARED_BIN}.new"
+    _fetch "${mirror}${url}" "${CLOUDFLARED_BIN}.new" 2>/dev/null
+  fi
+  if ! { head -c 4 "${CLOUDFLARED_BIN}.new" 2>/dev/null | grep -q ELF && [ "$(stat -c%s "${CLOUDFLARED_BIN}.new" 2>/dev/null || echo 0)" -gt 10485760 ]; }; then
+    _error "cloudflared 下载失败：直连与镜像均未获得有效二进制。可尝试: GH_PROXY=自定义镜像前缀 bash $0 重试。"
+    rm -f "${CLOUDFLARED_BIN}.new"
+    return 1
+  fi
   chmod +x "${CLOUDFLARED_BIN}.new"
   mv -f "${CLOUDFLARED_BIN}.new" "$CLOUDFLARED_BIN"
   _success "cloudflared 已安装。"

@@ -848,6 +848,68 @@ _reuse_external_tunnel() {
   return 0
 }
 
+# ---------------- Argo 节点/隧道删除 ----------------
+_delete_argo_menu() {
+  local ws_nodes
+  ws_nodes=$(jq -r '[.nodes[]? | select(.proto == "vless-ws" or .proto == "vmess-ws")] | length' "$METADATA_FILE")
+  local argo_enabled
+  argo_enabled=$(jq -r '.argo.enabled // false' "$METADATA_FILE")
+  echo "当前 Argo 隧道: $([ "$argo_enabled" = "true" ] && echo "已配置 ($(jq -r '.argo.mode' "$METADATA_FILE") 模式, 域名: $(jq -r '.argo.domain // "未探测"' "$METADATA_FILE"))" || echo "无 (未由本脚本管理)")"
+  echo "当前 Argo WS 节点数: ${ws_nodes}"
+  echo " 1) 删除 Argo 节点 (仅删本地 WS 监听, 隧道保留)"
+  echo " 2) 删除 Argo 隧道 (停止并清除本脚本管理的 cloudflared, 同时删除全部 Argo 节点)"
+  echo " 0) 返回"
+  read -rp "选择: " d || return
+  case "$d" in
+    1) _delete_argo_node ;;
+    2) _delete_argo_tunnel ;;
+    0) ;;
+    *) _error "无效输入。" ;;
+  esac
+}
+
+_delete_argo_node() {
+  local tags
+  tags=$(jq -r '.nodes[]? | select(.proto == "vless-ws" or .proto == "vmess-ws") | "\(.tag)\t\(.name)\t\(.port)"' "$METADATA_FILE")
+  [ -z "$tags" ] && { _warn "暂无 Argo 节点。"; return; }
+  echo "当前 Argo 节点:"
+  echo "$tags" | awk -F'\t' '{print "  " NR ") " $2 "  端口:" $3 "  (" $1 ")"}'
+  read -rp "输入要删除的编号: " i
+  local tag
+  tag=$(echo "$tags" | sed -n "${i}p" | cut -f1)
+  [ -z "$tag" ] && { _error "编号无效。"; return; }
+  _del_node_meta "$tag"
+  _regen_config; _restart_all
+  _success "Argo 节点已删除。"
+  # 临时隧道只映射一个端口：删掉映射节点后隧道已无意义，询问是否一并清除
+  if [ "$(jq -r '.argo.mode // ""' "$METADATA_FILE")" = "temp" ]; then
+    local remaining
+    remaining=$(jq -r '[.nodes[]? | select(.proto == "vless-ws" or .proto == "vmess-ws")] | length' "$METADATA_FILE")
+    if [ "$remaining" = "0" ] || [ "$(jq -r '.argo.port // 0' "$METADATA_FILE")" = "$(jq -r --arg t "$tag" '.nodes[]? | select(.tag == $t) | .port // 0' "$METADATA_FILE" | head -1)" ]; then
+      read -rp "临时隧道的映射节点已删除，是否同时停止并清除该隧道? [Y/n]: " s
+      [[ "$s" =~ ^[Nn]$ ]] || _delete_argo_tunnel
+    fi
+  fi
+}
+
+_delete_argo_tunnel() {
+  # 停止并禁用本脚本管理的 cloudflared；外部/复用的隧道不受影响
+  _stop_service "$ARGO_SERVICE_NAME"
+  if [ "$INIT_SYSTEM" = "systemd" ]; then
+    systemctl disable ${ARGO_SERVICE_NAME} >/dev/null 2>&1
+  elif [ "$INIT_SYSTEM" = "openrc" ]; then
+    rc-update del ${ARGO_SERVICE_NAME} >/dev/null 2>&1
+  fi
+  rm -f "${MIHOMO_DIR}/run-argo.sh" "${MIHOMO_DIR}/argo.pid"
+  # 删除全部 Argo WS 节点
+  jq -r '.nodes[]? | select(.proto == "vless-ws" or .proto == "vmess-ws") | .tag' "$METADATA_FILE" | while read -r t; do _del_node_meta "$t"; done
+  local tmp="${METADATA_FILE}.tmp"
+  jq '.argo = {enabled:false}' "$METADATA_FILE" > "$tmp" && mv "$tmp" "$METADATA_FILE"
+  : > "$ARGO_LOG" 2>/dev/null
+  _regen_config; _restart_all
+  _success "Argo 隧道及全部 Argo 节点已删除。"
+}
+
 _add_argo_node() {
   # ── 已有隧道检测（两层）────────────────────────────────
   # 第一层：本脚本管理的隧道（metadata.argo）
@@ -859,12 +921,17 @@ _add_argo_node() {
   # 仅当本脚本没有自管隧道时才检测，避免两层同时提示
   local ext_src="" ext_conf="/etc/cloudflared/config.yml"
   if ! jq -e '.argo.enabled == true' "$METADATA_FILE" >/dev/null 2>&1; then
-    if systemctl is-active cloudflared >/dev/null 2>&1; then
-      ext_src="systemd 服务 cloudflared"
-    elif pgrep -f "cloudflared tunnel" >/dev/null 2>&1 && ! _service_active "$ARGO_SERVICE_NAME" 2>/dev/null; then
-      ext_src="独立 cloudflared 进程"
-    elif [ -f "$ext_conf" ]; then
-      ext_src="配置文件 ${ext_conf}"
+    # 本脚本痕迹（服务单元/启动脚本/pidfile）存在说明是自己的残留进程，不算外部隧道
+    local our_trace=0
+    { [ -f /etc/systemd/system/${ARGO_SERVICE_NAME}.service ] || [ -f /etc/init.d/${ARGO_SERVICE_NAME} ] || [ -f "${MIHOMO_DIR}/run-argo.sh" ] || [ -f "${MIHOMO_DIR}/argo.pid" ]; } && our_trace=1
+    if [ "$our_trace" = "0" ]; then
+      if systemctl is-active cloudflared >/dev/null 2>&1; then
+        ext_src="systemd 服务 cloudflared"
+      elif pgrep -f "cloudflared tunnel" >/dev/null 2>&1; then
+        ext_src="独立 cloudflared 进程"
+      elif [ -f "$ext_conf" ]; then
+        ext_src="配置文件 ${ext_conf}"
+      fi
     fi
   fi
   if [ -n "$ext_src" ]; then
@@ -1045,7 +1112,7 @@ _show_menu() {
   echo ""
   echo -e "${GREEN}======== mihomo-lite 管理脚本 v${SCRIPT_VERSION} ========${NC}"
   echo " 1. 添加节点 (Reality/HY2/TUIC/AnyTLS/Mieru/SS2022/Trojan)"
-  echo " 2. Argo 隧道节点 (VLESS/VMess + WS, protocol=auto QUIC优先)"
+  echo " 2. Argo 隧道管理 (添加/删除节点与隧道, protocol=auto QUIC优先)"
   echo " 3. 查看节点链接"
   echo " 4. 删除节点"
   echo " 5. 重启服务"
@@ -1102,7 +1169,18 @@ _main_menu() {
           *) _error "无效输入。" ;;
         esac
         ;;
-      2) _add_argo_node ;;
+      2)
+        echo " 1) 添加 Argo 节点"
+        echo " 2) 删除 Argo 节点 / Argo 隧道"
+        echo " 0) 返回"
+        read -rp "Argo 管理: " a || break
+        case "$a" in
+          1) _add_argo_node ;;
+          2) _delete_argo_menu ;;
+          0) ;;
+          *) _error "无效输入。" ;;
+        esac
+        ;;
       3) _show_links ;;
       4) _delete_node_menu ;;
       5) _restart_all ;;

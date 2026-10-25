@@ -46,25 +46,39 @@ _check_root() {
 
 # ---------------- 依赖 ----------------
 _install_dependencies() {
-  local need=""
-  for c in curl jq openssl ss; do command -v "$c" >/dev/null 2>&1 || need="$need $c"; done
-  [ -z "$need" ] && return 0
-  _info "安装基础依赖:$need"
+  # 必要组件清单: 命令 → 包名(Debian/Alpine 通用, 差异处单独处理)
+  # curl/jq/openssl 基础三件套; ss(iproute2) 端口检测; pgrep(procps) 进程检测;
+  # shuf/readlink(coreutils) 随机SNI与脚本路径; bash 为脚本本体运行环境
+  local missing="" c
+  for c in curl jq openssl ss pgrep shuf readlink bash; do
+    command -v "$c" >/dev/null 2>&1 || missing="$missing $c"
+  done
+  # ca-certificates 无命令可查，检测证书目录
+  [ -d /etc/ssl/certs ] || missing="$missing ca-certificates"
+  [ -z "$missing" ] && return 0
+  _info "检测到缺少必要组件:$missing，正在安装..."
   if command -v apt >/dev/null 2>&1; then
     apt-get update -y >/dev/null 2>&1
-    apt-get install -y --no-install-recommends curl jq openssl iproute2 cron >/dev/null 2>&1
+    apt-get install -y --no-install-recommends curl jq openssl iproute2 procps coreutils bash ca-certificates cron >/dev/null 2>&1
   elif command -v apk >/dev/null 2>&1; then
-    apk add --no-cache curl jq openssl iproute2 cronie 2>/dev/null || apk add --no-cache curl jq openssl iproute2
+    apk add --no-cache curl jq openssl iproute2 procps coreutils bash ca-certificates 2>/dev/null || apk add --no-cache curl jq openssl
   elif command -v dnf >/dev/null 2>&1; then
-    dnf install -y curl jq openssl iproute2 cronie >/dev/null 2>&1
+    dnf install -y curl jq openssl iproute2 procps coreutils bash ca-certificates cronie >/dev/null 2>&1
   elif command -v yum >/dev/null 2>&1; then
-    yum install -y curl jq openssl iproute2 cronie >/dev/null 2>&1
+    yum install -y curl jq openssl iproute2 procps coreutils bash ca-certificates cronie >/dev/null 2>&1
   else
-    _error "无法识别的包管理器，请手动安装:$need"; return 1
+    _error "无法识别的包管理器，请手动安装:$missing"; return 1
   fi
-  for c in curl jq openssl; do
-    command -v "$c" >/dev/null 2>&1 || { _error "缺少 $c，请手动安装后重试。"; return 1; }
+  # 安装后逐一复核，缺一样就拒绝继续，避免半残环境跑出难排查的问题
+  missing=""
+  for c in curl jq openssl ss pgrep shuf readlink bash; do
+    command -v "$c" >/dev/null 2>&1 || missing="$missing $c"
   done
+  if [ -n "$missing" ]; then
+    _error "组件安装后仍缺失:$missing，请手动安装后重试。"
+    return 1
+  fi
+  _success "必要组件就绪。"
 }
 
 # ---------------- 工具函数 ----------------

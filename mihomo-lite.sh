@@ -1002,7 +1002,7 @@ _show_menu() {
   echo -e "${GREEN}======== mihomo-lite 管理脚本 v${SCRIPT_VERSION} ========${NC}"
   echo " 1. 添加节点 (Reality/HY2/TUIC/AnyTLS/Mieru/SS2022/Trojan)"
   echo " 2. Argo 隧道节点 (VLESS/VMess + WS, protocol=auto QUIC优先)"
-  echo " 3. 查看节点链接与订阅"
+  echo " 3. 查看节点链接"
   echo " 4. 删除节点"
   echo " 5. 重启服务"
   echo " 6. 停止服务"

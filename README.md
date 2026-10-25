@@ -42,6 +42,10 @@ bash <(curl -Ls https://raw.githubusercontent.com/guanxi660-crypto/mihomo-lite/m
 - 重启前 `mihomo -t` 配置校验 + 启动后存活兜底检查
 - SS2022 严格长度密钥校验（避免运行期 `decode psk` 错误）
 
+## 关于订阅
+
+本项目**不提供订阅生成链接**（不内置 HTTP 订阅端口），以保证 80 端口兼容性、避免占用节点机上的宝贵端口。如需生成订阅链接、在线管理节点，请移步 [SubPilot](https://github.com/guanxi660-crypto/SubPilot)。
+
 ## 免责声明
 
 仅供学习了解，非盈利目的。使用本程序须遵守部署服务器所在地及所在国家法律法规，作者不对任何不当行为负责。

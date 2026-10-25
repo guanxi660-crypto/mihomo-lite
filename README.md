@@ -44,7 +44,7 @@ bash <(curl -Ls https://raw.githubusercontent.com/guanxi660-crypto/mihomo-lite/m
 
 ## 关于订阅
 
-本项目**不提供订阅生成链接**（不内置 HTTP 订阅端口），以保证 80 端口兼容性、避免占用节点机上的宝贵端口。如需生成订阅链接、在线管理节点，请移步 [SubPilot](https://github.com/guanxi660-crypto/SubPilot)。
+本项目**不提供订阅生成链接**（不在节点机上开放 HTTP 订阅端口）：NAT/受限机器端口宝贵，多开一个明文 HTTP 端口既占资源又容易被扫描器探测到订阅内容、泄露节点信息。如需生成订阅链接、在线管理节点，请移步 [SubPilot](https://github.com/guanxi660-crypto/SubPilot)。
 
 ## 免责声明
 

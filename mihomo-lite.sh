@@ -17,7 +17,7 @@
 umask 077
 export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin${PATH:+:$PATH}"
 
-SCRIPT_VERSION="1.1.0"
+SCRIPT_VERSION="1.2.0"
 MIHOMO_DIR="/etc/mihomo-lite"
 MIHOMO_BIN="/usr/local/bin/mihomo"
 CLOUDFLARED_BIN="/usr/local/bin/cloudflared"
@@ -156,7 +156,7 @@ _regen_config() {
       _emit_listener "$n"
     done
   } > "$CONFIG_FILE"
-  _gen_client_sub
+  _build_links
   chmod 600 "$CONFIG_FILE" 2>/dev/null
 }
 
@@ -829,12 +829,56 @@ _create_argo_ws_listener() {
   CREATED_ARGO_PORT="$port"
 }
 
+# 复用本机已有的外部 cloudflared 隧道：只添加本地 WS 监听 + 指导用户在 CF 面板加路由
+_reuse_external_tunnel() {
+  _create_argo_ws_listener || return 1
+  local port="$CREATED_ARGO_PORT" host
+  _info "════ Cloudflare 面板操作指引 ════"
+  _info "1. 登录 Cloudflare Zero Trust 控制台 → Networks → Tunnels"
+  _info "2. 选择你已有的隧道 → Public Hostname → Add a public hostname"
+  _info "3. Subdomain 填子域 (如 argo2)，Domain 选你的域名"
+  _info "4. Type 选 HTTP，URL 填 127.0.0.1:${port}，保存"
+  read -rp "添加完成后输入该 Public Hostname 完整域名 (留空可稍后再补): " host
+  if [ -n "$host" ]; then
+    local tmp="${METADATA_FILE}.tmp"
+    jq --arg t "argo-${port}" --arg d "$host" '.nodes |= map(if .tag == $t then .argo_domain = $d else . end)' "$METADATA_FILE" > "$tmp" && mv "$tmp" "$METADATA_FILE"
+  fi
+  _build_links
+  _show_links
+  return 0
+}
+
 _add_argo_node() {
-  # 已有隧道检测：固定隧道可直接复用，只加本地监听；临时隧道只映射单端口，需用户决定是否重建
+  # ── 已有隧道检测（两层）────────────────────────────────
+  # 第一层：本脚本管理的隧道（metadata.argo）
   local existing_mode existing_domain existing_port
   existing_mode=$(jq -r '.argo.mode // ""' "$METADATA_FILE")
   existing_domain=$(jq -r '.argo.domain // ""' "$METADATA_FILE")
   existing_port=$(jq -r '.argo.port // ""' "$METADATA_FILE")
+  # 第二层：本机已由其他方式部署的 cloudflared 隧道（系统服务/独立进程）
+  # 仅当本脚本没有自管隧道时才检测，避免两层同时提示
+  local ext_src="" ext_conf="/etc/cloudflared/config.yml"
+  if ! jq -e '.argo.enabled == true' "$METADATA_FILE" >/dev/null 2>&1; then
+    if systemctl is-active cloudflared >/dev/null 2>&1; then
+      ext_src="systemd 服务 cloudflared"
+    elif pgrep -f "cloudflared tunnel" >/dev/null 2>&1 && ! _service_active "$ARGO_SERVICE_NAME" 2>/dev/null; then
+      ext_src="独立 cloudflared 进程"
+    elif [ -f "$ext_conf" ]; then
+      ext_src="配置文件 ${ext_conf}"
+    fi
+  fi
+  if [ -n "$ext_src" ]; then
+    _success "检测到本机已有 cloudflared 隧道在运行 (来源: ${ext_src})。"
+    [ -f "$ext_conf" ] && _info "隧道配置: ${ext_conf}"
+    echo " 1) 复用已有隧道 (只添加本地 WS 监听, 在 CF 面板为新端口添加 Public Hostname)"
+    echo " 2) 新建隧道 (Token/临时隧道, 由本脚本管理, 不影响已有隧道)"
+    read -rp "选择 [1]: " tc
+    if [[ ! "$tc" = "2" ]]; then
+      _reuse_external_tunnel
+      return $?
+    fi
+    _info "将与已有隧道并行新建独立隧道 (cloudflared 多实例可共存)。"
+  fi
   if jq -e '.argo.enabled == true' "$METADATA_FILE" >/dev/null 2>&1; then
     if [ "$existing_mode" = "token" ]; then
       _success "检测到本机已有固定隧道 (域名: ${existing_domain:-未填写})，直接复用。"
@@ -1028,7 +1072,7 @@ _main_menu() {
   while true; do
     _menu_status
     _show_menu
-    read -rp "请选择: " choice
+    read -rp "请选择: " choice || { echo ""; _info "输入结束，退出。"; exit 0; }
     case "$choice" in
       1)
         # 添加节点前检查核心是否已安装，未安装可当场确认安装

@@ -1,6 +1,6 @@
 # mihomo-lite
 
-> **⚠️ 测试阶段（BETA）**：本项目当前处于测试阶段，功能与配置格式可能随时调整，请勿在生产环境使用。已通过 WSL Ubuntu-24.04 (systemd) 实测，真实 VPS 环境欢迎反馈。
+> **⚠️ 测试阶段（BETA）**：本项目当前处于测试阶段，功能与配置格式可能随时调整，请勿在生产环境使用。
 
 mihomo 内核多协议服务端一键管理脚本，交互风格参考 [singbox-lite](https://github.com/0xdabiaoge/singbox-lite)。
 
@@ -39,10 +39,6 @@ bash <(curl -Ls https://raw.githubusercontent.com/guanxi660-crypto/mihomo-lite/m
 - 支持 systemd / OpenRC / 无 init 直跑三种模式
 - 重启前 `mihomo -t` 配置校验 + 启动后存活兜底检查
 - SS2022 严格长度密钥校验（避免运行期 `decode psk` 错误）
-
-## 已测试环境
-
-- WSL Ubuntu-24.04（systemd）：7 种协议节点 + Argo 临时隧道（QUIC 注册成功，回源实测通过 http2）
 
 ## 免责声明
 

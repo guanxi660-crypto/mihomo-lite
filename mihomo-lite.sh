@@ -794,13 +794,70 @@ _add_trojan_reality() {
 
 # ---------------- Argo 隧道节点 ----------------
 # 说明：cloudflared 使用 --protocol auto，默认优先 QUIC，被墙/UDP 不通时自动回退 http2(TCP)
-_add_argo_node() {
+
+# 创建本机 WS 监听节点（Argo 回源用），供新隧道与复用已有隧道两条路径共用
+_create_argo_ws_listener() {
   local proto
   echo "1) VLESS + WS  2) VMess + WS"
   read -rp "选择 Argo 节点协议 [1]: " c
   [[ "$c" = "2" ]] && proto="vmess-ws" || proto="vless-ws"
   _ask_port "本机 WS 监听端口 (Argo 回源端口, 仅 127.0.0.1)" 8001 || return 1
-  local port="$ASK_PORT_RESULT" uuid path mode token domain
+  local port="$ASK_PORT_RESULT" uuid path
+  uuid=$(_gen_uuid)
+  path="/$(_gen_hex 8)"
+  local node
+  node=$(jq -cn --arg tag "argo-${port}" --arg name "Argo-${proto}" --arg port "$port" \
+    --arg proto "$proto" --arg uuid "$uuid" --arg path "$path" \
+    '{tag:$tag,name:$name,proto:$proto,port:($port|tonumber),uuid:$uuid,ws_path:$path}')
+  _add_node_meta "$node"
+  _regen_config; _restart_all
+  CREATED_ARGO_PORT="$port"
+}
+
+_add_argo_node() {
+  # 已有隧道检测：固定隧道可直接复用，只加本地监听；临时隧道只映射单端口，需用户决定是否重建
+  local existing_mode existing_domain existing_port
+  existing_mode=$(jq -r '.argo.mode // ""' "$METADATA_FILE")
+  existing_domain=$(jq -r '.argo.domain // ""' "$METADATA_FILE")
+  existing_port=$(jq -r '.argo.port // ""' "$METADATA_FILE")
+  if jq -e '.argo.enabled == true' "$METADATA_FILE" >/dev/null 2>&1; then
+    if [ "$existing_mode" = "token" ]; then
+      _success "检测到本机已有固定隧道 (域名: ${existing_domain:-未填写})，直接复用。"
+      _create_argo_ws_listener || return 1
+      local port="$CREATED_ARGO_PORT" host
+      if [ "$port" = "$existing_port" ]; then
+        # 同端口：直接沿用隧道已有域名
+        local tmp="${METADATA_FILE}.tmp"
+        jq --arg d "$existing_domain" '.nodes |= map(if (.proto == "vless-ws" or .proto == "vmess-ws") then .argo_domain = $d else . end)' "$METADATA_FILE" > "$tmp" && mv "$tmp" "$METADATA_FILE"
+        _build_links
+      else
+        _info "════ Cloudflare 面板操作指引 ════"
+        _info "1. 登录 Cloudflare Zero Trust 控制台 → Networks → Tunnels"
+        _info "2. 点击你现有的隧道 → Public Hostname → Add a public hostname"
+        _info "3. Subdomain 填子域 (如 argo2)，Domain 选你的域名"
+        _info "4. Type 选 HTTP，URL 填 127.0.0.1:${port}，保存"
+        read -rp "添加完成后输入该 Public Hostname 完整域名 (留空可稍后用菜单3查看前手动补充): " host
+        if [ -n "$host" ]; then
+          local tmp="${METADATA_FILE}.tmp"
+          jq --arg t "argo-${port}" --arg d "$host" '.nodes |= map(if .tag == $t then .argo_domain = $d else . end)' "$METADATA_FILE" > "$tmp" && mv "$tmp" "$METADATA_FILE"
+          _build_links
+        fi
+      fi
+      _show_links
+      return 0
+    else
+      _warn "检测到本机已有临时隧道 (域名: ${existing_domain:-探测中}，映射端口 ${existing_port})。"
+      _warn "临时隧道只能映射一个回源端口，新增节点需要重建隧道（域名会变化）。"
+      read -rp "是否重建临时隧道? [y/N]: " r
+      [[ "$r" =~ ^[Yy]$ ]] || { _info "已取消。"; return 0; }
+    fi
+  fi
+  local proto mode token domain
+  echo "1) VLESS + WS  2) VMess + WS"
+  read -rp "选择 Argo 节点协议 [1]: " c
+  [[ "$c" = "2" ]] && proto="vmess-ws" || proto="vless-ws"
+  _ask_port "本机 WS 监听端口 (Argo 回源端口, 仅 127.0.0.1)" 8001 || return 1
+  local port="$ASK_PORT_RESULT" uuid path
   uuid=$(_gen_uuid)
   path="/$(_gen_hex 8)"
   echo "1) 临时隧道 (trycloudflare.com, 域名随机)  2) 固定隧道 (Cloudflare Tunnel Token)"
@@ -811,6 +868,7 @@ _add_argo_node() {
     read -rp "固定隧道域名 (如 argo.example.com): " domain
     [ -z "$domain" ] && { _error "固定隧道必须填写域名。"; return 1; }
     mode="token"
+    _info "面板路径: Zero Trust → Networks → Tunnels → 该隧道 → Public Hostname，Type=HTTP，URL=127.0.0.1:${port}"
   else
     mode="temp"; domain=""
     _info "临时隧道域名将在启动后自动探测。"
@@ -955,8 +1013,24 @@ _main_menu() {
     read -rp "请选择: " choice
     case "$choice" in
       1)
-        echo " 1) VLESS+Reality+Vision  2) Hysteria2  3) TUIC v5  4) AnyTLS"
-        echo " 5) Mieru  6) SS2022  7) Trojan+Reality  0) 返回"
+        # 添加节点前检查核心是否已安装，未安装可当场确认安装
+        if [ ! -x "$MIHOMO_BIN" ]; then
+          _warn "检测到 mihomo 核心未安装。"
+          read -rp "是否现在安装 mihomo 核心? [Y/n]: " ic
+          if [[ ! "$ic" =~ ^[Nn]$ ]]; then
+            install_core || { _error "核心安装失败，请检查网络后重试。"; continue; }
+          else
+            _warn "未安装核心，节点添加后将无法运行。"
+          fi
+        fi
+        echo " 1) VLESS+Reality+Vision"
+        echo " 2) Hysteria2"
+        echo " 3) TUIC v5"
+        echo " 4) AnyTLS"
+        echo " 5) Mieru"
+        echo " 6) SS2022"
+        echo " 7) Trojan+Reality"
+        echo " 0) 返回"
         read -rp "协议: " p
         case "$p" in
           1) _add_vless_reality ;; 2) _add_hysteria2 ;; 3) _add_tuic ;;

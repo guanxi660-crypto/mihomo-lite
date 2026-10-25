@@ -17,7 +17,7 @@
 umask 077
 export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin${PATH:+:$PATH}"
 
-SCRIPT_VERSION="1.0.0"
+SCRIPT_VERSION="1.1.0"
 MIHOMO_DIR="/etc/mihomo-lite"
 MIHOMO_BIN="/usr/local/bin/mihomo"
 CLOUDFLARED_BIN="/usr/local/bin/cloudflared"
@@ -473,13 +473,26 @@ install_core() {
   [[ "$ver" == *"Mihomo"* ]] || { _error "核心版本校验失败: ${ver:-无输出}"; rm -f "${MIHOMO_BIN}.new"; return 1; }
   mv -f "${MIHOMO_BIN}.new" "$MIHOMO_BIN"
   _success "mihomo 核心已安装: ${ver}"
-  install_cloudflared
+  # 不随核心安装 cloudflared：只在添加 Argo 节点且本机没有时才按需安装，
+  # 避免干扰原机已有的 Cloudflare 部署。
   _create_services
   _restart_all
 }
 
+# cloudflared 二进制定位：优先复用本机已有的安装，绝不覆盖。
+# 常见路径: /usr/local/bin (本脚本管理位) → PATH → /usr/bin (apt 等包管理器安装)
+_cloudflared_bin() {
+  local p
+  for p in "$CLOUDFLARED_BIN" "$(command -v cloudflared 2>/dev/null)" /usr/bin/cloudflared /usr/local/bin/cloudflared; do
+    [ -n "$p" ] && [ -x "$p" ] && { echo "$p"; return 0; }
+  done
+  return 1
+}
+
 install_cloudflared() {
-  [ -x "$CLOUDFLARED_BIN" ] && return 0
+  # 已有任何位置安装的 cloudflared 一律复用，避免破坏原机已有的 Cloudflare 部署
+  local existing
+  existing=$(_cloudflared_bin) && { _info "检测到本机已有 cloudflared (${existing})，直接复用，不重新下载。"; return 0; }
   local arch; arch=$(_detect_arch) || return 1
   _info "下载 cloudflared (${arch})..."
   local url="https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-${arch}"
@@ -556,13 +569,15 @@ EOF
 _write_argo_runner() {
   local mode="$1" token="$2" port="$3"
   local proto="${ARGO_PROTOCOL:-auto}"
+  local cfbin
+  cfbin=$(_cloudflared_bin) || { _error "cloudflared 未安装。"; return 1; }
   {
     echo "#!/bin/bash"
     echo "exec > >(tee -a '${ARGO_LOG}') 2>&1"
     if [ "$mode" = "token" ]; then
-      echo "exec ${CLOUDFLARED_BIN} tunnel --no-autoupdate --protocol '${proto}' --token '${token}'"
+      echo "exec ${cfbin} tunnel --no-autoupdate --protocol '${proto}' --token '${token}'"
     else
-      echo "exec ${CLOUDFLARED_BIN} tunnel --no-autoupdate --protocol '${proto}' --url http://127.0.0.1:${port}"
+      echo "exec ${cfbin} tunnel --no-autoupdate --protocol '${proto}' --url http://127.0.0.1:${port}"
     fi
   } > "${MIHOMO_DIR}/run-argo.sh"
   chmod 700 "${MIHOMO_DIR}/run-argo.sh"
@@ -873,6 +888,8 @@ _add_argo_node() {
     mode="temp"; domain=""
     _info "临时隧道域名将在启动后自动探测。"
   fi
+  # 按需安装：本机没有任何 cloudflared 时才下载，已有则复用
+  _cloudflared_bin >/dev/null || install_cloudflared || return 1
   # 删除旧的 argo 节点（一个隧道只挂一个 ws 节点）
   jq -r '.nodes[]? | select(.proto == "vless-ws" or .proto == "vmess-ws") | .tag' "$METADATA_FILE" | while read -r t; do _del_node_meta "$t"; done
   local node
@@ -953,7 +970,8 @@ _uninstall() {
       ;;
     openrc) rm -f /etc/init.d/${SERVICE_NAME} /etc/init.d/${ARGO_SERVICE_NAME} ;;
   esac
-  rm -f "$MIHOMO_BIN" "$CLOUDFLARED_BIN"
+  rm -f "$MIHOMO_BIN"
+  # cloudflared 可能属于原机已有部署，卸载本脚本时不删除
   rm -rf "$MIHOMO_DIR"
   rm -f /usr/local/bin/ml
   _success "mihomo-lite 已卸载。"

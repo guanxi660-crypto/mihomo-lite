@@ -1,5 +1,7 @@
 # mihomo-lite
 
+> 版本：v1.1.0
+>
 > **⚠️ 测试阶段（BETA）**：本项目当前处于测试阶段，功能与配置格式可能随时调整，请勿在生产环境使用。
 
 mihomo 内核多协议服务端一键管理脚本，交互风格参考 [singbox-lite](https://github.com/0xdabiaoge/singbox-lite)。

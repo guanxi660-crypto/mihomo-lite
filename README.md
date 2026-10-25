@@ -1,6 +1,6 @@
 # mihomo-lite
 
-> 版本：v1.2.0
+> 版本：v1.3.0
 >
 > **⚠️ 测试阶段（BETA）**：本项目当前处于测试阶段，功能与配置格式可能随时调整，请勿在生产环境使用。
 
@@ -31,20 +31,16 @@ ARGO_PROTOCOL=http2 bash mihomo-lite.sh
 ## 安装
 
 ```bash
-bash <(curl -Ls https://raw.githubusercontent.com/guanxi660-crypto/mihomo-lite/main/mihomo-lite.sh)
+(curl -LfsS https://raw.githubusercontent.com/guanxi660-crypto/mihomo-lite/main/mihomo-lite.sh -o /usr/local/bin/mh || wget -q https://raw.githubusercontent.com/guanxi660-crypto/mihomo-lite/main/mihomo-lite.sh -O /usr/local/bin/mh) && chmod +x /usr/local/bin/mh && mh
 ```
 
-raw.githubusercontent.com 直连不畅时，用镜像拉取脚本：
+脚本拉取不畅时用镜像：
 
 ```bash
-bash <(curl -Ls https://gh-proxy.com/https://raw.githubusercontent.com/guanxi660-crypto/mihomo-lite/main/mihomo-lite.sh)
+(curl -LfsS https://gh-proxy.com/https://raw.githubusercontent.com/guanxi660-crypto/mihomo-lite/main/mihomo-lite.sh -o /usr/local/bin/mh || wget -q https://gh-proxy.com/https://raw.githubusercontent.com/guanxi660-crypto/mihomo-lite/main/mihomo-lite.sh -O /usr/local/bin/mh) && chmod +x /usr/local/bin/mh && mh
 ```
 
-核心下载失败（提示"直连与镜像均未获得有效压缩包"）时，可指定其他镜像前缀重试：
-
-```bash
-GH_PROXY=https://ghfast.top/ bash <(curl -Ls https://gh-proxy.com/https://raw.githubusercontent.com/guanxi660-crypto/mihomo-lite/main/mihomo-lite.sh)
-```
+安装后随时以 root 运行 `mh` 进入管理菜单；脚本更新用菜单【11 更新脚本】。核心下载失败时可用 `GH_PROXY=镜像前缀 mh` 重试（如 `GH_PROXY=https://ghfast.top/ mh`）。
 
 ## 功能
 

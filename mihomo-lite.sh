@@ -17,7 +17,7 @@
 umask 077
 export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin${PATH:+:$PATH}"
 
-SCRIPT_VERSION="1.2.0"
+SCRIPT_VERSION="1.3.0"
 MIHOMO_DIR="/etc/mihomo-lite"
 MIHOMO_BIN="/usr/local/bin/mihomo"
 CLOUDFLARED_BIN="/usr/local/bin/cloudflared"
@@ -29,6 +29,8 @@ ARGO_LOG="/var/log/mihomo-argo.log"
 CORE_LOG="/var/log/mihomo-core.log"
 SERVICE_NAME="mihomo-lite"
 ARGO_SERVICE_NAME="mihomo-argo"
+GITHUB_RAW_URL="https://raw.githubusercontent.com/guanxi660-crypto/mihomo-lite/main/mihomo-lite.sh"
+SELF_SCRIPT_PATH="$(readlink -f "$0" 2>/dev/null || echo "$0")"
 DEFAULT_SNI_LIST="www.amd.com www.cloudflare.com www.amazon.com www.microsoft.com"
 
 # ---------------- 基础输出 ----------------
@@ -1099,6 +1101,26 @@ _delete_node_menu() {
   _success "节点已删除。"
 }
 
+# ---------------- 脚本自更新 ----------------
+_update_script() {
+  local target="/usr/local/bin/mh"
+  # 已装到常驻路径则原地更新，否则安装到 /usr/local/bin/mh
+  [ -x "$SELF_SCRIPT_PATH" ] && [[ "$SELF_SCRIPT_PATH" == /usr/local/bin/* ]] && target="$SELF_SCRIPT_PATH"
+  _info "更新脚本: ${GITHUB_RAW_URL} → ${target}"
+  local mirror="${GH_PROXY:-https://gh-proxy.com/}"
+  local tmp="${MIHOMO_DIR}/mh.update"
+  rm -f "$tmp"
+  _fetch "$GITHUB_RAW_URL" "$tmp" || _fetch "${mirror}${GITHUB_RAW_URL}" "$tmp"
+  if ! { [ -s "$tmp" ] && head -n1 "$tmp" | grep -q "^#!/bin/bash" && bash -n "$tmp" 2>/dev/null; }; then
+    _error "脚本下载或校验失败，未做任何更改。"
+    rm -f "$tmp"
+    return 1
+  fi
+  chmod +x "$tmp"
+  mv -f "$tmp" "$target"
+  _success "脚本已更新到 ${target}，重新运行 mh 生效。"
+}
+
 # ---------------- 卸载 ----------------
 _uninstall() {
   read -rp "确认卸载 mihomo-lite (核心/服务/配置全部删除)? [y/N]: " c
@@ -1115,7 +1137,7 @@ _uninstall() {
   rm -f "$MIHOMO_BIN"
   # cloudflared 可能属于原机已有部署，卸载本脚本时不删除
   rm -rf "$MIHOMO_DIR"
-  rm -f /usr/local/bin/ml
+  rm -f /usr/local/bin/mh /usr/local/bin/ml
   _success "mihomo-lite 已卸载。"
   exit 0
 }
@@ -1152,7 +1174,8 @@ _show_menu() {
   echo " 8. 查看实时日志"
   echo " 9. 重新获取 Argo 临时隧道域名"
   echo "10. 安装/更新 mihomo 核心"
-  echo "11. 卸载"
+  echo "11. 更新脚本 (mh)"
+  echo "12. 卸载"
   echo " 0. 退出"
 }
 
@@ -1220,7 +1243,8 @@ _main_menu() {
       8) _show_logs ;;
       9) _renew_temp_argo ;;
       10) install_core ;;
-      11) _uninstall ;;
+      11) _update_script ;;
+      12) _uninstall ;;
       0) exit 0 ;;
       *) _error "无效输入。" ;;
     esac

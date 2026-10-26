@@ -17,7 +17,7 @@
 umask 077
 export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin${PATH:+:$PATH}"
 
-SCRIPT_VERSION="1.4.1"
+SCRIPT_VERSION="1.4.2"
 MIHOMO_DIR="/etc/mihomo-lite"
 MIHOMO_BIN="/usr/local/bin/mihomo"
 CLOUDFLARED_BIN="/usr/local/bin/cloudflared"
@@ -50,7 +50,7 @@ _install_dependencies() {
   # curl/jq/openssl 基础三件套; ss(iproute2) 端口检测; pgrep(procps) 进程检测;
   # timeout/tee/seq/base64/shuf/readlink(coreutils); bash 为脚本本体运行环境
   local missing="" c
-  for c in curl jq openssl ss pgrep shuf readlink bash timeout tee; do
+  for c in curl jq openssl ss ip pgrep shuf readlink bash timeout tee; do
     command -v "$c" >/dev/null 2>&1 || missing="$missing $c"
   done
   # ca-certificates 无命令可查，检测证书目录
@@ -71,7 +71,7 @@ _install_dependencies() {
   fi
   # 安装后逐一复核，缺一样就拒绝继续，避免半残环境跑出难排查的问题
   missing=""
-  for c in curl jq openssl ss pgrep shuf readlink bash timeout tee; do
+  for c in curl jq openssl ss ip pgrep shuf readlink bash timeout tee; do
     command -v "$c" >/dev/null 2>&1 || missing="$missing $c"
   done
   if [ -n "$missing" ]; then
@@ -87,11 +87,63 @@ _gen_hex()     { openssl rand -hex "$1" 2>/dev/null; }
 _url_encode()  { printf '%s' "$1" | jq -sRr @uri; }
 _b64_nopad()   { printf '%s' "$1" | base64 | tr -d '\n\r' | sed 's/=//g'; }
 
-_get_public_ip() {
+_get_ip4() {
   local ip
   ip=$(timeout 5 curl -4fsS --max-time 4 https://icanhazip.com 2>/dev/null || timeout 5 curl -4fsS --max-time 4 https://ipinfo.io/ip 2>/dev/null)
-  [ -z "$ip" ] && ip=$(timeout 5 curl -6fsS --max-time 4 https://icanhazip.com 2>/dev/null)
+  printf '%s' "${ip//[$'\r\n ']/}"
+}
+
+_get_ip6() {
+  local ip
+  ip=$(timeout 5 curl -6fsS --max-time 4 https://icanhazip.com 2>/dev/null || timeout 5 curl -6fsS --max-time 4 https://ipinfo.io/ip 2>/dev/null)
+  printf '%s' "${ip//[$'\r\n ']/}"
+}
+
+_get_public_ip() {
+  local ip
+  ip=$(_get_ip4)
+  [ -z "$ip" ] && ip=$(_get_ip6)
   printf '%s' "$ip"
+}
+
+# 按节点记录的 ip_ver 解析用于链接的地址; 双栈缺失时自动回退另一栈
+_resolve_node_ip() {
+  local ver="$1" v4 v6
+  case "$ver" in
+    v6)
+      v6=$(_get_ip6); [ -n "$v6" ] && { printf '%s' "$v6"; return; }
+      _get_ip4
+      ;;
+    *)
+      v4=$(_get_ip4); [ -n "$v4" ] && { printf '%s' "$v4"; return; }
+      _get_ip6
+      ;;
+  esac
+}
+
+# listener 监听地址: 有全局 IPv4 用 0.0.0.0(兼容所有环境), 纯 IPv6 机器必须用 ::
+# (0.0.0.0 只绑 IPv4, IPv6-only 机器上节点将完全连不上)
+_listen_addr() {
+  if ip -4 addr show scope global 2>/dev/null | grep -q "inet "; then
+    echo "0.0.0.0"
+  else
+    echo "::"
+  fi
+}
+
+# 询问对外 IP 版本; 只有单栈时静默采用, 结果存 IP_VER
+_ask_ip_ver() {
+  local v4 v6
+  v4=$(_get_ip4); v6=$(_get_ip6)
+  if [ -n "$v4" ] && [ -n "$v6" ]; then
+    echo "本机双栈可用: IPv4=${v4}  IPv6=${v6}"
+    read -rp "对外 IP 版本 (4/6) [4]: " iv
+    IP_VER=$([ "$iv" = "6" ] && echo v6 || echo v4)
+  elif [ -n "$v6" ]; then
+    IP_VER="v6"; _info "检测到仅 IPv6，节点使用 IPv6 地址。"
+  else
+    IP_VER="v4"
+  fi
 }
 
 _detect_init_system() {
@@ -183,6 +235,7 @@ _del_node_meta() {
 _regen_config() {
   local up
   up=$(jq -r '.argo.enabled // false' "$METADATA_FILE")
+  LISTEN_ADDR=$(_listen_addr)
   {
     echo "# 由 mihomo-lite 自动生成，请勿手动编辑"
     echo "mixed-port: 7890"
@@ -214,7 +267,7 @@ _emit_listener() {
   - name: "${tag}"
     type: vless
     port: ${port}
-    listen: 0.0.0.0
+    listen: ${LISTEN_ADDR}
     udp: true
     users:
       - username: "u1"
@@ -273,7 +326,7 @@ EOF
   - name: "${tag}"
     type: hysteria2
     port: ${port}
-    listen: 0.0.0.0
+    listen: ${LISTEN_ADDR}
     users:
       u1: "${pass}"
 $( [ -n "$obfs" ] && printf '    obfs: %s\n    obfs-password: "%s"\n' "$obfs" "$obfspass" )
@@ -292,7 +345,7 @@ EOF
   - name: "${tag}"
     type: tuic
     port: ${port}
-    listen: 0.0.0.0
+    listen: ${LISTEN_ADDR}
     users:
       "${uuid}": "${pass}"
     certificate: "${crt}"
@@ -313,7 +366,7 @@ EOF
   - name: "${tag}"
     type: anytls
     port: ${port}
-    listen: 0.0.0.0
+    listen: ${LISTEN_ADDR}
     users:
       "${user}": "${pass}"
     certificate: "${crt}"
@@ -328,7 +381,7 @@ EOF
   - name: "${tag}"
     type: mieru
     port: ${port}
-    listen: 0.0.0.0
+    listen: ${LISTEN_ADDR}
     transport: ${transport}
     users:
       "${user}": "${pass}"
@@ -341,7 +394,7 @@ EOF
   - name: "${tag}"
     type: shadowsocks
     port: ${port}
-    listen: 0.0.0.0
+    listen: ${LISTEN_ADDR}
     cipher: ${cipher}
     password: "${pass}"
     udp: true
@@ -355,7 +408,7 @@ EOF
   - name: "${tag}"
     type: trojan
     port: ${port}
-    listen: 0.0.0.0
+    listen: ${LISTEN_ADDR}
     udp: true
     users:
       - username: "u1"
@@ -385,13 +438,17 @@ _build_links() {
     local tag proto port link=""
     tag=$(jq -r '.name // .tag' <<<"$n"); proto=$(jq -r '.proto' <<<"$n"); port=$(jq -r '.port' <<<"$n")
     local enc_tag enc_name
+    local ipv host
+    ipv=$(jq -r '.ip_ver // "v4"' <<<"$n")
+    ip=$(_resolve_node_ip "$ipv")
+    if [[ "$ip" == *:* ]]; then host="[$ip]"; else host="$ip"; fi
     enc_tag=$(_b64_nopad "$tag")
     case "$proto" in
       vless-reality)
         local uuid pbk sid sni
         uuid=$(jq -r '.uuid' <<<"$n"); pbk=$(jq -r '.public_key' <<<"$n")
         sid=$(jq -r '.short_id' <<<"$n"); sni=$(jq -r '.sni' <<<"$n")
-        link="vless://${uuid}@${ip}:${port}?encryption=none&flow=xtls-rprx-vision&security=reality&sni=${sni}&fp=chrome&pbk=${pbk}&sid=${sid}&type=tcp#${enc_tag}"
+        link="vless://${uuid}@${host}:${port}?encryption=none&flow=xtls-rprx-vision&security=reality&sni=${sni}&fp=chrome&pbk=${pbk}&sid=${sid}&type=tcp#${enc_tag}"
         {
           printf '  - name: "%s"\n    type: vless\n    server: %s\n    port: %s\n    uuid: %s\n    udp: true\n    tls: true\n    flow: xtls-rprx-vision\n    servername: %s\n    client-fingerprint: chrome\n    network: tcp\n    reality-opts:\n      public-key: %s\n      short-id: "%s"\n' "$tag" "$ip" "$port" "$uuid" "$sni" "$pbk" "$sid"
         } >> "$yaml_file"
@@ -415,7 +472,7 @@ _build_links() {
         local pass sni obfs obfp
         pass=$(jq -r '.password' <<<"$n"); sni=$(jq -r '.sni' <<<"$n")
         obfs=$(jq -r '.obfs // ""' <<<"$n"); obfp=$(jq -r '.obfs_password // ""' <<<"$n")
-        link="hy2://${pass}@${ip}:${port}?sni=${sni}&insecure=1"
+        link="hy2://${pass}@${host}:${port}?sni=${sni}&insecure=1"
         [ -n "$obfs" ] && link="${link}&obfs=salamander&obfs-password=${obfp}"
         link="${link}#${enc_tag}"
         {
@@ -426,13 +483,13 @@ _build_links() {
       tuic)
         local uuid pass sni
         uuid=$(jq -r '.uuid' <<<"$n"); pass=$(jq -r '.password' <<<"$n"); sni=$(jq -r '.sni' <<<"$n")
-        link="tuic://${uuid}:${pass}@${ip}:${port}?sni=${sni}&alpn=h3&congestion_control=bbr&udp_relay_mode=native&allow_insecure=1#${enc_tag}"
+        link="tuic://${uuid}:${pass}@${host}:${port}?sni=${sni}&alpn=h3&congestion_control=bbr&udp_relay_mode=native&allow_insecure=1#${enc_tag}"
         printf '  - name: "%s"\n    type: tuic\n    server: %s\n    port: %s\n    uuid: %s\n    password: "%s"\n    sni: %s\n    skip-cert-verify: true\n    congestion-controller: bbr\n    alpn:\n      - h3\n    udp: true\n' "$tag" "$ip" "$port" "$uuid" "$pass" "$sni" >> "$yaml_file"
         ;;
       anytls)
         local user pass sni
         user=$(jq -r '.username' <<<"$n"); pass=$(jq -r '.password' <<<"$n"); sni=$(jq -r '.sni' <<<"$n")
-        link="anytls://${user}:${pass}@${ip}:${port}?sni=${sni}&insecure=1#${enc_tag}"
+        link="anytls://${user}:${pass}@${host}:${port}?sni=${sni}&insecure=1#${enc_tag}"
         printf '  - name: "%s"\n    type: anytls\n    server: %s\n    port: %s\n    username: %s\n    password: "%s"\n    sni: %s\n    skip-cert-verify: true\n' "$tag" "$ip" "$port" "$user" "$pass" "$sni" >> "$yaml_file"
         ;;
       mieru)
@@ -446,14 +503,14 @@ _build_links() {
         local cipher pass userinfo
         cipher=$(jq -r '.cipher' <<<"$n"); pass=$(jq -r '.password' <<<"$n")
         userinfo=$(_b64_nopad "${cipher}:${pass}")
-        link="ss://${userinfo}@${ip}:${port}#${enc_tag}"
+        link="ss://${userinfo}@${host}:${port}#${enc_tag}"
         printf '  - name: "%s"\n    type: ss\n    server: %s\n    port: %s\n    cipher: %s\n    password: "%s"\n    udp: true\n' "$tag" "$ip" "$port" "$cipher" "$pass" >> "$yaml_file"
         ;;
       trojan-reality)
         local pass pbk sid sni
         pass=$(jq -r '.password' <<<"$n"); pbk=$(jq -r '.public_key' <<<"$n")
         sid=$(jq -r '.short_id' <<<"$n"); sni=$(jq -r '.sni' <<<"$n")
-        link="trojan://${pass}@${ip}:${port}?security=reality&sni=${sni}&fp=chrome&pbk=${pbk}&sid=${sid}&type=tcp#${enc_tag}"
+        link="trojan://${pass}@${host}:${port}?security=reality&sni=${sni}&fp=chrome&pbk=${pbk}&sid=${sid}&type=tcp#${enc_tag}"
         printf '  - name: "%s"\n    type: trojan\n    server: %s\n    port: %s\n    password: "%s"\n    udp: true\n    sni: %s\n    client-fingerprint: chrome\n    reality-opts:\n      public-key: %s\n      short-id: "%s"\n' "$tag" "$ip" "$port" "$pass" "$sni" "$pbk" "$sid" >> "$yaml_file"
         ;;
     esac
@@ -464,9 +521,10 @@ _build_links() {
 
 _show_links() {
   _build_links
-  local ip; ip=$(_get_public_ip)
+  local v4 v6
+  v4=$(_get_ip4); v6=$(_get_ip6)
   echo ""
-  echo -e "${CYAN}================ 节点分享链接 (服务器 IP: ${ip}) ================${NC}"
+  echo -e "${CYAN}================ 节点分享链接 (IPv4: ${v4:-无}  IPv6: ${v6:-无}) ================${NC}"
   if [ -s "${SUB_DIR}/links.txt" ]; then
     cat "${SUB_DIR}/links.txt"
   else
@@ -780,11 +838,12 @@ _add_vless_reality() {
     "${MIHOMO_BIN}" generate vless-x25519 2>/dev/null || _warn "当前核心版本不支持该命令，跳过。"
     read -rp "粘贴服务端 decryption 字符串 (留空跳过): " enc
   fi
+  _ask_ip_ver
   _ask_node_name "VLESS-Reality"
   local node
-  node=$(jq -cn --arg tag "vless-r-${port}" --arg name "$NODE_NAME" --arg port "$port" \
+  node=$(jq -cn --arg tag "vless-r-${port}" --arg name "$NODE_NAME" --arg port "$port" --arg ipver "$IP_VER" \
     --arg uuid "$uuid" --arg pk "$pk" --arg pub "$pub" --arg sid "$sid" --arg sni "$sni" --arg dec "$enc" \
-    '{tag:$tag,name:$name,proto:"vless-reality",port:($port|tonumber),uuid:$uuid,private_key:$pk,public_key:$pub,short_id:$sid,sni:$sni,decryption:(if $dec=="" then null else $dec end)}')
+    '{tag:$tag,name:$name,ip_ver:$ipver,proto:"vless-reality",port:($port|tonumber),uuid:$uuid,private_key:$pk,public_key:$pub,short_id:$sid,sni:$sni,decryption:(if $dec=="" then null else $dec end)}')
   _add_node_meta "$node"
   _regen_config; _restart_all; _show_links
 }
@@ -802,11 +861,12 @@ _add_hysteria2() {
   read -rp "伪装站 masquerade (可空, 如 https://news.ycombinator.com): " m; masq="$m"
   local ck; ck=$(_gen_selfsigned_cert "$sni" "hy2-${port}") || return 1
   local crt="${ck%%|*}" key="${ck##*|}"
+  _ask_ip_ver
   _ask_node_name "HY2"
   local node
-  node=$(jq -cn --arg tag "hy2-${port}" --arg name "$NODE_NAME" --arg port "$port" --arg pass "$pass" \
+  node=$(jq -cn --arg tag "hy2-${port}" --arg name "$NODE_NAME" --arg port "$port" --arg pass "$pass" --arg ipver "$IP_VER" \
     --arg obfs "$obfs" --arg obfp "$obfp" --arg crt "$crt" --arg key "$key" --arg sni "$sni" --arg masq "$masq" \
-    '{tag:$tag,name:$name,proto:"hysteria2",port:($port|tonumber),password:$pass,obfs:$obfs,obfs_password:$obfp,cert:$crt,key:$key,sni:$sni,masquerade:(if $masq=="" then null else $masq end)}')
+    '{tag:$tag,name:$name,ip_ver:$ipver,proto:"hysteria2",port:($port|tonumber),password:$pass,obfs:$obfs,obfs_password:$obfp,cert:$crt,key:$key,sni:$sni,masquerade:(if $masq=="" then null else $masq end)}')
   _add_node_meta "$node"
   _regen_config; _restart_all; _show_links
 }
@@ -820,11 +880,12 @@ _add_tuic() {
   uuid=$(_gen_uuid); pass=$(_gen_hex 16)
   read -rp "认证密码 [${pass}]: " p; pass="${p:-$pass}"
   local ck; ck=$(_gen_selfsigned_cert "$sni" "tuic-${port}") || return 1
+  _ask_ip_ver
   _ask_node_name "TUIC"
   local node
-  node=$(jq -cn --arg tag "tuic-${port}" --arg name "$NODE_NAME" --arg port "$port" \
+  node=$(jq -cn --arg tag "tuic-${port}" --arg name "$NODE_NAME" --arg port "$port" --arg ipver "$IP_VER" \
     --arg uuid "$uuid" --arg pass "$pass" --arg crt "${ck%%|*}" --arg key "${ck##*|}" --arg sni "$sni" \
-    '{tag:$tag,name:$name,proto:"tuic",port:($port|tonumber),uuid:$uuid,password:$pass,cert:$crt,key:$key,sni:$sni}')
+    '{tag:$tag,name:$name,ip_ver:$ipver,proto:"tuic",port:($port|tonumber),uuid:$uuid,password:$pass,cert:$crt,key:$key,sni:$sni}')
   _add_node_meta "$node"
   _regen_config; _restart_all; _show_links
 }
@@ -838,11 +899,12 @@ _add_anytls() {
   user="u1"; pass=$(_gen_hex 16)
   read -rp "认证密码 [${pass}]: " p; pass="${p:-$pass}"
   local ck; ck=$(_gen_selfsigned_cert "$sni" "anytls-${port}") || return 1
+  _ask_ip_ver
   _ask_node_name "AnyTLS"
   local node
-  node=$(jq -cn --arg tag "anytls-${port}" --arg name "$NODE_NAME" --arg port "$port" \
+  node=$(jq -cn --arg tag "anytls-${port}" --arg name "$NODE_NAME" --arg port "$port" --arg ipver "$IP_VER" \
     --arg user "$user" --arg pass "$pass" --arg crt "${ck%%|*}" --arg key "${ck##*|}" --arg sni "$sni" \
-    '{tag:$tag,name:$name,proto:"anytls",port:($port|tonumber),username:$user,password:$pass,cert:$crt,key:$key,sni:$sni}')
+    '{tag:$tag,name:$name,ip_ver:$ipver,proto:"anytls",port:($port|tonumber),username:$user,password:$pass,cert:$crt,key:$key,sni:$sni}')
   _add_node_meta "$node"
   _regen_config; _restart_all; _show_links
 }
@@ -854,11 +916,12 @@ _add_mieru() {
   read -rp "传输层 TCP/UDP [TCP]: " t; transport="${t^^}"; [[ "$transport" == "UDP" ]] || transport="TCP"
   user="u1"; pass=$(_gen_hex 16)
   read -rp "认证密码 [${pass}]: " p; pass="${p:-$pass}"
+  _ask_ip_ver
   _ask_node_name "Mieru"
   local node
-  node=$(jq -cn --arg tag "mieru-${port}" --arg name "$NODE_NAME" --arg port "$port" \
+  node=$(jq -cn --arg tag "mieru-${port}" --arg name "$NODE_NAME" --arg port "$port" --arg ipver "$IP_VER" \
     --arg user "$user" --arg pass "$pass" --arg tr "$transport" \
-    '{tag:$tag,name:$name,proto:"mieru",port:($port|tonumber),username:$user,password:$pass,transport:$tr}')
+    '{tag:$tag,name:$name,ip_ver:$ipver,proto:"mieru",port:($port|tonumber),username:$user,password:$pass,transport:$tr}')
   _add_node_meta "$node"
   _regen_config; _restart_all; _show_links
 }
@@ -880,11 +943,12 @@ _add_ss2022() {
   local decoded_len
   decoded_len=$(printf '%s' "$pass" | base64 -d 2>/dev/null | wc -c)
   [ "$decoded_len" = "$len" ] || { _error "密码不是合法 base64 或解码长度不等于 ${len} 字节，请重新添加。"; return 1; }
+  _ask_ip_ver
   _ask_node_name "SS2022"
   local node
-  node=$(jq -cn --arg tag "ss-${port}" --arg name "$NODE_NAME" --arg port "$port" \
+  node=$(jq -cn --arg tag "ss-${port}" --arg name "$NODE_NAME" --arg port "$port" --arg ipver "$IP_VER" \
     --arg cipher "$cipher" --arg pass "$pass" \
-    '{tag:$tag,name:$name,proto:"ss2022",port:($port|tonumber),cipher:$cipher,password:$pass}')
+    '{tag:$tag,name:$name,ip_ver:$ipver,proto:"ss2022",port:($port|tonumber),cipher:$cipher,password:$pass}')
   _add_node_meta "$node"
   _regen_config; _restart_all; _show_links
 }
@@ -903,11 +967,12 @@ _add_trojan_reality() {
   pub=$(awk '/PublicKey/{print $2}' <<<"$kp")
   [ -z "$pk" ] || [ -z "$pub" ] && { _error "Reality 密钥对生成失败。"; return 1; }
   sid=$(_gen_hex 4)
+  _ask_ip_ver
   _ask_node_name "Trojan-Reality"
   local node
-  node=$(jq -cn --arg tag "trojan-r-${port}" --arg name "$NODE_NAME" --arg port "$port" \
+  node=$(jq -cn --arg tag "trojan-r-${port}" --arg name "$NODE_NAME" --arg port "$port" --arg ipver "$IP_VER" \
     --arg pass "$pass" --arg pk "$pk" --arg pub "$pub" --arg sid "$sid" --arg sni "$sni" \
-    '{tag:$tag,name:$name,proto:"trojan-reality",port:($port|tonumber),password:$pass,private_key:$pk,public_key:$pub,short_id:$sid,sni:$sni}')
+    '{tag:$tag,name:$name,ip_ver:$ipver,proto:"trojan-reality",port:($port|tonumber),password:$pass,private_key:$pk,public_key:$pub,short_id:$sid,sni:$sni}')
   _add_node_meta "$node"
   _regen_config; _restart_all; _show_links
 }
@@ -925,11 +990,12 @@ _create_argo_ws_listener() {
   local port="$ASK_PORT_RESULT" uuid path
   uuid=$(_gen_uuid)
   path="/$(_gen_hex 8)"
+  _ask_ip_ver
   _ask_node_name "Argo-${proto}"
   local node
-  node=$(jq -cn --arg tag "argo-${port}" --arg name "$NODE_NAME" --arg port "$port" \
+  node=$(jq -cn --arg tag "argo-${port}" --arg name "$NODE_NAME" --arg port "$port" --arg ipver "$IP_VER" \
     --arg proto "$proto" --arg uuid "$uuid" --arg path "$path" \
-    '{tag:$tag,name:$name,proto:$proto,port:($port|tonumber),uuid:$uuid,ws_path:$path}')
+    '{tag:$tag,name:$name,ip_ver:$ipver,proto:$proto,port:($port|tonumber),uuid:$uuid,ws_path:$path}')
   _add_node_meta "$node"
   _regen_config; _restart_all
   CREATED_ARGO_PORT="$port"
@@ -981,6 +1047,16 @@ _modify_node_menu() {
     if _check_port_conflict "$v"; then return 1; fi
     new_port="$v"
   fi
+
+  # 对外 IP 版本(双栈机器可选)
+  local ip_ver_cur ip_ver_new
+  ip_ver_cur=$(jq -r --argjson i "$idx" '.nodes[$i].ip_ver // "v4"' "$METADATA_FILE")
+  read -rp "对外 IP 版本 (4/6) [${ip_ver_cur#v}]: " v
+  case "$v" in
+    4) ip_ver_new="v4" ;;
+    6) ip_ver_new="v6" ;;
+    *) ip_ver_new="$ip_ver_cur" ;;
+  esac
 
   # 需要更新的值(默认=原值)与对应的 jq filter 片段
   local sni uuid pass obfp path domain
@@ -1044,7 +1120,7 @@ _modify_node_menu() {
   [ "$new_port" != "$port" ] && new_tag="${tag%-$port}-${new_port}"
 
   local tmp="${METADATA_FILE}.tmp"
-  if jq --argjson i "$idx" --arg name "$new_name" --argjson port "$new_port" --arg tag "$new_tag"      --arg sni "${sni:-}" --arg uuid "${uuid:-}" --arg pass "${pass:-}" --arg obfp "${obfp:-}"      --arg path "${path:-}" --arg domain "${domain:-}"      ".nodes[\$i] |= (.name = \$name | .port = \$port | .tag = \$tag${filter})"      "$METADATA_FILE" > "$tmp" && [ -s "$tmp" ]; then
+  if jq --argjson i "$idx" --arg name "$new_name" --argjson port "$new_port" --arg tag "$new_tag" --arg ipver "$ip_ver_new"      --arg sni "${sni:-}" --arg uuid "${uuid:-}" --arg pass "${pass:-}" --arg obfp "${obfp:-}"      --arg path "${path:-}" --arg domain "${domain:-}"      ".nodes[\$i] |= (.name = \$name | .port = \$port | .tag = \$tag | .ip_ver = \$ipver${filter})"      "$METADATA_FILE" > "$tmp" && [ -s "$tmp" ]; then
     mv "$tmp" "$METADATA_FILE"
   else
     rm -f "$tmp"
@@ -1201,6 +1277,7 @@ _add_argo_node() {
   path="/$(_gen_hex 8)"
   echo "1) 临时隧道 (trycloudflare.com, 域名随机)  2) 固定隧道 (Cloudflare Tunnel Token)"
   read -rp "选择隧道模式 [1]: " m
+  _ask_ip_ver
   _ask_node_name "Argo-${proto}"
   if [[ "$m" = "2" ]]; then
     read -rp "粘贴 Cloudflare Tunnel Token: " token
@@ -1219,8 +1296,8 @@ _add_argo_node() {
   jq -r '.nodes[]? | select(.proto == "vless-ws" or .proto == "vmess-ws") | .tag' "$METADATA_FILE" | while read -r t; do _del_node_meta "$t"; done
   local node
   node=$(jq -cn --arg tag "argo-${port}" --arg name "$NODE_NAME" --arg port "$port" \
-    --arg proto "$proto" --arg uuid "$uuid" --arg path "$path" \
-    '{tag:$tag,name:$name,proto:$proto,port:($port|tonumber),uuid:$uuid,ws_path:$path}')
+    --arg proto "$proto" --arg uuid "$uuid" --arg path "$path" --arg ipver "$IP_VER" \
+    '{tag:$tag,name:$name,ip_ver:$ipver,proto:$proto,port:($port|tonumber),uuid:$uuid,ws_path:$path}')
   _add_node_meta "$node"
   # 更新 argo 状态
   local tmp="${METADATA_FILE}.tmp"

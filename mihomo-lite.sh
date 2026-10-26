@@ -17,7 +17,7 @@
 umask 077
 export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin${PATH:+:$PATH}"
 
-SCRIPT_VERSION="1.3.1"
+SCRIPT_VERSION="1.4.0"
 MIHOMO_DIR="/etc/mihomo-lite"
 MIHOMO_BIN="/usr/local/bin/mihomo"
 CLOUDFLARED_BIN="/usr/local/bin/cloudflared"
@@ -102,6 +102,29 @@ _detect_init_system() {
   else
     INIT_SYSTEM="direct"
   fi
+}
+
+# 默认节点名: 国家-运营商-协议 (ip-api.com 免费接口, 中文运营商名, 失败退化为 XX-ISP)
+_geo_node_name() {
+  local proto_label="$1" cc isp
+  cc=$(timeout 5 curl -fsS "http://ip-api.com/line/?fields=countryCode" 2>/dev/null | tr -d '\n\r ')
+  isp=$(timeout 5 curl -fsS "http://ip-api.com/line/?fields=isp&lang=zh" 2>/dev/null | head -n1 | tr -d '\r')
+  [ -z "$cc" ] && cc="XX"
+  if [ -z "$isp" ]; then
+    isp="ISP"
+  else
+    isp="${isp%%(*}"; isp="${isp%% *}"; isp="${isp:0:16}"
+    [ -z "$isp" ] && isp="ISP"
+  fi
+  echo "${cc}-${isp}-${proto_label}"
+}
+
+# 节点命名交互: 传协议显示名, 结果存 NODE_NAME
+_ask_node_name() {
+  local def
+  def=$(_geo_node_name "$1")
+  read -rp "节点名称 [${def}]: " nm || return 0
+  NODE_NAME="${nm:-$def}"
 }
 
 _check_port_conflict() {
@@ -747,8 +770,9 @@ _add_vless_reality() {
     "${MIHOMO_BIN}" generate vless-x25519 2>/dev/null || _warn "当前核心版本不支持该命令，跳过。"
     read -rp "粘贴服务端 decryption 字符串 (留空跳过): " enc
   fi
+  _ask_node_name "VLESS-Reality"
   local node
-  node=$(jq -cn --arg tag "vless-r-${port}" --arg name "VLESS-Reality-${port}" --arg port "$port" \
+  node=$(jq -cn --arg tag "vless-r-${port}" --arg name "$NODE_NAME" --arg port "$port" \
     --arg uuid "$uuid" --arg pk "$pk" --arg pub "$pub" --arg sid "$sid" --arg sni "$sni" --arg dec "$enc" \
     '{tag:$tag,name:$name,proto:"vless-reality",port:($port|tonumber),uuid:$uuid,private_key:$pk,public_key:$pub,short_id:$sid,sni:$sni,decryption:(if $dec=="" then null else $dec end)}')
   _add_node_meta "$node"
@@ -768,8 +792,9 @@ _add_hysteria2() {
   read -rp "伪装站 masquerade (可空, 如 https://news.ycombinator.com): " m; masq="$m"
   local ck; ck=$(_gen_selfsigned_cert "$sni" "hy2-${port}") || return 1
   local crt="${ck%%|*}" key="${ck##*|}"
+  _ask_node_name "HY2"
   local node
-  node=$(jq -cn --arg tag "hy2-${port}" --arg name "HY2-${port}" --arg port "$port" --arg pass "$pass" \
+  node=$(jq -cn --arg tag "hy2-${port}" --arg name "$NODE_NAME" --arg port "$port" --arg pass "$pass" \
     --arg obfs "$obfs" --arg obfp "$obfp" --arg crt "$crt" --arg key "$key" --arg sni "$sni" --arg masq "$masq" \
     '{tag:$tag,name:$name,proto:"hysteria2",port:($port|tonumber),password:$pass,obfs:$obfs,obfs_password:$obfp,cert:$crt,key:$key,sni:$sni,masquerade:(if $masq=="" then null else $masq end)}')
   _add_node_meta "$node"
@@ -785,8 +810,9 @@ _add_tuic() {
   uuid=$(_gen_uuid); pass=$(_gen_hex 16)
   read -rp "认证密码 [${pass}]: " p; pass="${p:-$pass}"
   local ck; ck=$(_gen_selfsigned_cert "$sni" "tuic-${port}") || return 1
+  _ask_node_name "TUIC"
   local node
-  node=$(jq -cn --arg tag "tuic-${port}" --arg name "TUIC-${port}" --arg port "$port" \
+  node=$(jq -cn --arg tag "tuic-${port}" --arg name "$NODE_NAME" --arg port "$port" \
     --arg uuid "$uuid" --arg pass "$pass" --arg crt "${ck%%|*}" --arg key "${ck##*|}" --arg sni "$sni" \
     '{tag:$tag,name:$name,proto:"tuic",port:($port|tonumber),uuid:$uuid,password:$pass,cert:$crt,key:$key,sni:$sni}')
   _add_node_meta "$node"
@@ -802,8 +828,9 @@ _add_anytls() {
   user="u1"; pass=$(_gen_hex 16)
   read -rp "认证密码 [${pass}]: " p; pass="${p:-$pass}"
   local ck; ck=$(_gen_selfsigned_cert "$sni" "anytls-${port}") || return 1
+  _ask_node_name "AnyTLS"
   local node
-  node=$(jq -cn --arg tag "anytls-${port}" --arg name "AnyTLS-${port}" --arg port "$port" \
+  node=$(jq -cn --arg tag "anytls-${port}" --arg name "$NODE_NAME" --arg port "$port" \
     --arg user "$user" --arg pass "$pass" --arg crt "${ck%%|*}" --arg key "${ck##*|}" --arg sni "$sni" \
     '{tag:$tag,name:$name,proto:"anytls",port:($port|tonumber),username:$user,password:$pass,cert:$crt,key:$key,sni:$sni}')
   _add_node_meta "$node"
@@ -817,8 +844,9 @@ _add_mieru() {
   read -rp "传输层 TCP/UDP [TCP]: " t; transport="${t^^}"; [[ "$transport" == "UDP" ]] || transport="TCP"
   user="u1"; pass=$(_gen_hex 16)
   read -rp "认证密码 [${pass}]: " p; pass="${p:-$pass}"
+  _ask_node_name "Mieru"
   local node
-  node=$(jq -cn --arg tag "mieru-${port}" --arg name "Mieru-${port}" --arg port "$port" \
+  node=$(jq -cn --arg tag "mieru-${port}" --arg name "$NODE_NAME" --arg port "$port" \
     --arg user "$user" --arg pass "$pass" --arg tr "$transport" \
     '{tag:$tag,name:$name,proto:"mieru",port:($port|tonumber),username:$user,password:$pass,transport:$tr}')
   _add_node_meta "$node"
@@ -842,8 +870,9 @@ _add_ss2022() {
   local decoded_len
   decoded_len=$(printf '%s' "$pass" | base64 -d 2>/dev/null | wc -c)
   [ "$decoded_len" = "$len" ] || { _error "密码不是合法 base64 或解码长度不等于 ${len} 字节，请重新添加。"; return 1; }
+  _ask_node_name "SS2022"
   local node
-  node=$(jq -cn --arg tag "ss-${port}" --arg name "SS2022-${port}" --arg port "$port" \
+  node=$(jq -cn --arg tag "ss-${port}" --arg name "$NODE_NAME" --arg port "$port" \
     --arg cipher "$cipher" --arg pass "$pass" \
     '{tag:$tag,name:$name,proto:"ss2022",port:($port|tonumber),cipher:$cipher,password:$pass}')
   _add_node_meta "$node"
@@ -864,8 +893,9 @@ _add_trojan_reality() {
   pub=$(awk '/PublicKey/{print $2}' <<<"$kp")
   [ -z "$pk" ] || [ -z "$pub" ] && { _error "Reality 密钥对生成失败。"; return 1; }
   sid=$(_gen_hex 4)
+  _ask_node_name "Trojan-Reality"
   local node
-  node=$(jq -cn --arg tag "trojan-r-${port}" --arg name "Trojan-Reality-${port}" --arg port "$port" \
+  node=$(jq -cn --arg tag "trojan-r-${port}" --arg name "$NODE_NAME" --arg port "$port" \
     --arg pass "$pass" --arg pk "$pk" --arg pub "$pub" --arg sid "$sid" --arg sni "$sni" \
     '{tag:$tag,name:$name,proto:"trojan-reality",port:($port|tonumber),password:$pass,private_key:$pk,public_key:$pub,short_id:$sid,sni:$sni}')
   _add_node_meta "$node"
@@ -885,8 +915,9 @@ _create_argo_ws_listener() {
   local port="$ASK_PORT_RESULT" uuid path
   uuid=$(_gen_uuid)
   path="/$(_gen_hex 8)"
+  _ask_node_name "Argo-${proto}"
   local node
-  node=$(jq -cn --arg tag "argo-${port}" --arg name "Argo-${proto}" --arg port "$port" \
+  node=$(jq -cn --arg tag "argo-${port}" --arg name "$NODE_NAME" --arg port "$port" \
     --arg proto "$proto" --arg uuid "$uuid" --arg path "$path" \
     '{tag:$tag,name:$name,proto:$proto,port:($port|tonumber),uuid:$uuid,ws_path:$path}')
   _add_node_meta "$node"
@@ -912,6 +943,108 @@ _reuse_external_tunnel() {
   _show_links
   return 0
 }
+
+# ---------------- 节点修改 ----------------
+# 按协议开放可改字段, 空输入=保留原值; 值全部经 --arg 传给 jq, 不做字符串拼接
+_modify_node_menu() {
+  local count
+  count=$(jq '.nodes | length' "$METADATA_FILE" 2>/dev/null || echo 0)
+  [ "$count" = "0" ] && { _warn "暂无节点。"; return; }
+  echo "当前节点:"
+  jq -r '.nodes | to_entries[] | "  \(.key+1)) [\(.value.proto)] \(.value.name)  端口:\(.value.port)"' "$METADATA_FILE"
+  read -rp "输入要修改的编号 (0 取消): " i
+  [[ "$i" =~ ^[0-9]+$ ]] || return
+  [ "$i" = "0" ] && return
+  local idx=$((i-1))
+  local proto tag name port
+  proto=$(jq -r --argjson i "$idx" '.nodes[$i].proto // empty' "$METADATA_FILE")
+  [ -z "$proto" ] && { _error "编号无效。"; return; }
+  tag=$(jq -r --argjson i "$idx" '.nodes[$i].tag' "$METADATA_FILE")
+  name=$(jq -r --argjson i "$idx" '.nodes[$i].name' "$METADATA_FILE")
+  port=$(jq -r --argjson i "$idx" '.nodes[$i].port' "$METADATA_FILE")
+
+  local new_name="$name" new_port="$port" v
+  read -rp "节点名称 [${name}]: " v; new_name="${v:-$name}"
+  read -rp "端口 [${port}]: " v
+  if [ -n "$v" ] && [ "$v" != "$port" ]; then
+    # _check_port_conflict 约定: 返回 0=冲突, 返回 1=可用
+    if _check_port_conflict "$v"; then return 1; fi
+    new_port="$v"
+  fi
+
+  # 需要更新的值(默认=原值)与对应的 jq filter 片段
+  local sni uuid pass obfp path domain
+  local filter=""
+  case "$proto" in
+    vless-reality)
+      sni=$(jq -r --argjson i "$idx" '.nodes[$i].sni // ""' "$METADATA_FILE")
+      read -rp "伪装 SNI [${sni}]: " v; sni="${v:-$sni}"
+      uuid=$(jq -r --argjson i "$idx" '.nodes[$i].uuid' "$METADATA_FILE")
+      read -rp "重新生成 UUID? [y/N]: " u
+      [[ "$u" =~ ^[Yy]$ ]] && uuid=$(_gen_uuid)
+      filter=' | .sni = $sni | .uuid = $uuid'
+      ;;
+    hysteria2)
+      pass=$(jq -r --argjson i "$idx" '.nodes[$i].password // ""' "$METADATA_FILE")
+      obfp=$(jq -r --argjson i "$idx" '.nodes[$i].obfs_password // ""' "$METADATA_FILE")
+      read -rp "认证密码 [${pass}]: " v; pass="${v:-$pass}"
+      read -rp "混淆密码 [${obfp}]: " v; obfp="${v:-$obfp}"
+      filter=' | .password = $pass | .obfs_password = $obfp'
+      ;;
+    tuic|anytls|mieru)
+      pass=$(jq -r --argjson i "$idx" '.nodes[$i].password // ""' "$METADATA_FILE")
+      read -rp "认证密码 [${pass}]: " v; pass="${v:-$pass}"
+      filter=' | .password = $pass'
+      ;;
+    ss2022)
+      pass=$(jq -r --argjson i "$idx" '.nodes[$i].password // ""' "$METADATA_FILE")
+      local len
+      len=$(jq -r --argjson i "$idx" '.nodes[$i].cipher | if test("aes-128") then 16 else 32 end' "$METADATA_FILE")
+      read -rp "密码 (${len} 字节 base64) [${pass}]: " v; pass="${v:-$pass}"
+      local dlen
+      dlen=$(printf '%s' "$pass" | base64 -d 2>/dev/null | wc -c)
+      [ "$dlen" = "$len" ] || { _error "密码不是合法 base64 或长度不等于 ${len} 字节，未做修改。"; return 1; }
+      filter=' | .password = $pass'
+      ;;
+    trojan-reality)
+      pass=$(jq -r --argjson i "$idx" '.nodes[$i].password // ""' "$METADATA_FILE")
+      sni=$(jq -r --argjson i "$idx" '.nodes[$i].sni // ""' "$METADATA_FILE")
+      read -rp "认证密码 [${pass}]: " v; pass="${v:-$pass}"
+      read -rp "伪装 SNI [${sni}]: " v; sni="${v:-$sni}"
+      filter=' | .password = $pass | .sni = $sni'
+      ;;
+    vless-ws|vmess-ws)
+      uuid=$(jq -r --argjson i "$idx" '.nodes[$i].uuid' "$METADATA_FILE")
+      path=$(jq -r --argjson i "$idx" '.nodes[$i].ws_path // ""' "$METADATA_FILE")
+      domain=$(jq -r --argjson i "$idx" '.nodes[$i].argo_domain // ""' "$METADATA_FILE")
+      read -rp "重新生成 UUID? [y/N]: " u
+      [[ "$u" =~ ^[Yy]$ ]] && uuid=$(_gen_uuid)
+      read -rp "重新生成 WS 路径? [y/N]: " u
+      [[ "$u" =~ ^[Yy]$ ]] && path="/$(_gen_hex 8)"
+      read -rp "Argo 域名 [${domain:-未设置}]: " v; domain="${v:-$domain}"
+      filter=' | .uuid = $uuid | .ws_path = $path | .argo_domain = (if $domain == "" then null else $domain end)'
+      ;;
+    *)
+      _warn "该协议暂不支持在线修改字段，仅可改名称与端口。"
+      ;;
+  esac
+
+  # 端口变更时 tag 同步重生成 (tag 形如 前缀-端口)
+  local new_tag="$tag"
+  [ "$new_port" != "$port" ] && new_tag="${tag%-$port}-${new_port}"
+
+  local tmp="${METADATA_FILE}.tmp"
+  if jq --argjson i "$idx" --arg name "$new_name" --argjson port "$new_port" --arg tag "$new_tag"      --arg sni "${sni:-}" --arg uuid "${uuid:-}" --arg pass "${pass:-}" --arg obfp "${obfp:-}"      --arg path "${path:-}" --arg domain "${domain:-}"      ".nodes[\$i] |= (.name = \$name | .port = \$port | .tag = \$tag${filter})"      "$METADATA_FILE" > "$tmp" && [ -s "$tmp" ]; then
+    mv "$tmp" "$METADATA_FILE"
+  else
+    rm -f "$tmp"
+    _error "修改写入失败，未做任何更改。"
+    return 1
+  fi
+  _regen_config; _restart_all; _show_links
+  _success "节点已修改。"
+}
+
 
 # ---------------- Argo 节点/隧道删除 ----------------
 _delete_argo_menu() {
@@ -1058,6 +1191,7 @@ _add_argo_node() {
   path="/$(_gen_hex 8)"
   echo "1) 临时隧道 (trycloudflare.com, 域名随机)  2) 固定隧道 (Cloudflare Tunnel Token)"
   read -rp "选择隧道模式 [1]: " m
+  _ask_node_name "Argo-${proto}"
   if [[ "$m" = "2" ]]; then
     read -rp "粘贴 Cloudflare Tunnel Token: " token
     [ -z "$token" ] && { _error "Token 不能为空。"; return 1; }
@@ -1074,7 +1208,7 @@ _add_argo_node() {
   # 删除旧的 argo 节点（一个隧道只挂一个 ws 节点）
   jq -r '.nodes[]? | select(.proto == "vless-ws" or .proto == "vmess-ws") | .tag' "$METADATA_FILE" | while read -r t; do _del_node_meta "$t"; done
   local node
-  node=$(jq -cn --arg tag "argo-${port}" --arg name "Argo-${proto}" --arg port "$port" \
+  node=$(jq -cn --arg tag "argo-${port}" --arg name "$NODE_NAME" --arg port "$port" \
     --arg proto "$proto" --arg uuid "$uuid" --arg path "$path" \
     '{tag:$tag,name:$name,proto:$proto,port:($port|tonumber),uuid:$uuid,ws_path:$path}')
   _add_node_meta "$node"
@@ -1205,14 +1339,15 @@ _show_menu() {
   echo " 2. Argo 隧道管理 (添加/删除节点与隧道, protocol=auto QUIC优先)"
   echo " 3. 查看节点链接"
   echo " 4. 删除节点"
-  echo " 5. 重启服务"
-  echo " 6. 停止服务"
-  echo " 7. 查看运行状态"
-  echo " 8. 查看实时日志"
-  echo " 9. 重新获取 Argo 临时隧道域名"
-  echo "10. 安装/更新 mihomo 核心"
-  echo "11. 更新脚本 (mh)"
-  echo "12. 卸载"
+  echo " 5. 修改节点"
+  echo " 6. 重启服务"
+  echo " 7. 停止服务"
+  echo " 8. 查看运行状态"
+  echo " 9. 查看实时日志"
+  echo "10. 重新获取 Argo 临时隧道域名"
+  echo "11. 安装/更新 mihomo 核心"
+  echo "12. 更新脚本 (mh)"
+  echo "13. 卸载"
   echo " 0. 退出"
 }
 
@@ -1274,14 +1409,15 @@ _main_menu() {
         ;;
       3) _show_links ;;
       4) _delete_node_menu ;;
-      5) _restart_all ;;
-      6) _stop_service "$SERVICE_NAME"; _stop_service "$ARGO_SERVICE_NAME"; _success "已停止。" ;;
-      7) _menu_status ;;
-      8) _show_logs ;;
-      9) _renew_temp_argo ;;
-      10) install_core ;;
-      11) _update_script ;;
-      12) _uninstall ;;
+      5) _modify_node_menu ;;
+      6) _restart_all ;;
+      7) _stop_service "$SERVICE_NAME"; _stop_service "$ARGO_SERVICE_NAME"; _success "已停止。" ;;
+      8) _menu_status ;;
+      9) _show_logs ;;
+      10) _renew_temp_argo ;;
+      11) install_core ;;
+      12) _update_script ;;
+      13) _uninstall ;;
       0) exit 0 ;;
       *) _error "无效输入。" ;;
     esac

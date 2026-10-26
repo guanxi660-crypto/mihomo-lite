@@ -17,7 +17,7 @@
 umask 077
 export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin${PATH:+:$PATH}"
 
-SCRIPT_VERSION="1.3.0"
+SCRIPT_VERSION="1.3.1"
 MIHOMO_DIR="/etc/mihomo-lite"
 MIHOMO_BIN="/usr/local/bin/mihomo"
 CLOUDFLARED_BIN="/usr/local/bin/cloudflared"
@@ -982,21 +982,26 @@ _add_argo_node() {
   existing_mode=$(jq -r '.argo.mode // ""' "$METADATA_FILE")
   existing_domain=$(jq -r '.argo.domain // ""' "$METADATA_FILE")
   existing_port=$(jq -r '.argo.port // ""' "$METADATA_FILE")
-  # 第二层：本机已由其他方式部署的 cloudflared 隧道（系统服务/独立进程）
+  # 第二层：本机已由其他方式部署的 cloudflared 隧道（系统服务/独立进程/官方 token 部署）
   # 仅当本脚本没有自管隧道时才检测，避免两层同时提示
   local ext_src="" ext_conf="/etc/cloudflared/config.yml"
   if ! jq -e '.argo.enabled == true' "$METADATA_FILE" >/dev/null 2>&1; then
-    # 本脚本痕迹（服务单元/启动脚本/pidfile）存在说明是自己的残留进程，不算外部隧道
-    local our_trace=0
-    { [ -f /etc/systemd/system/${ARGO_SERVICE_NAME}.service ] || [ -f /etc/init.d/${ARGO_SERVICE_NAME} ] || [ -f "${MIHOMO_DIR}/run-argo.sh" ] || [ -f "${MIHOMO_DIR}/argo.pid" ]; } && our_trace=1
-    if [ "$our_trace" = "0" ]; then
-      if systemctl is-active cloudflared >/dev/null 2>&1; then
-        ext_src="systemd 服务 cloudflared"
-      elif pgrep -f "cloudflared tunnel" >/dev/null 2>&1; then
-        ext_src="独立 cloudflared 进程"
-      elif [ -f "$ext_conf" ]; then
-        ext_src="配置文件 ${ext_conf}"
-      fi
+    # 本脚本自管 argo 的 cloudflared 进程不算外部（按 PID 排除，不用文件痕迹一刀切——
+    # 卸载残留的 service 单元会让外部隧道被误跳过）
+    local our_pids=" "
+    local p
+    [ -f "${MIHOMO_DIR}/argo.pid" ] && our_pids+="$(cat "${MIHOMO_DIR}/argo.pid" 2>/dev/null) "
+    [ "$INIT_SYSTEM" = "systemd" ] && our_pids+="$(systemctl show -p MainPID --value ${ARGO_SERVICE_NAME} 2>/dev/null) "
+    if systemctl is-active cloudflared >/dev/null 2>&1; then
+      ext_src="systemd 服务 cloudflared"
+    elif [ -f "$ext_conf" ] || [ -f /etc/cloudflared/token ]; then
+      ext_src="cloudflared 配置 (${ext_conf} / token)"
+    else
+      for p in $(pgrep -x cloudflared 2>/dev/null); do
+        case " $our_pids " in *" $p "*) continue ;; esac
+        ext_src="独立 cloudflared 进程 (PID ${p})"
+        break
+      done
     fi
   fi
   if [ -n "$ext_src" ]; then

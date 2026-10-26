@@ -489,8 +489,20 @@ install_core() {
   local tag
   tag=$(curl -fsSL --connect-timeout 15 "https://api.github.com/repos/MetaCubeX/mihomo/releases/latest" | jq -r '.tag_name // empty')
   [ -z "$tag" ] && { _error "获取 mihomo 版本号失败，请检查网络。"; return 1; }
-  local fname="mihomo-linux-${arch}-${tag}.gz"
-  local url="https://github.com/MetaCubeX/mihomo/releases/download/${tag}/${fname}"
+  local fname url
+  # CPU 能力检测：mihomo 官方 amd64 资产分两档
+  #   mihomo-linux-amd64-{tag}.gz      → GOAMD64=v1 兼容版（老 CPU 可跑）
+  #   mihomo-linux-amd64-v3-{tag}.gz   → 需要 AVX2/BMI2/FMA (x86-64-v3)
+  # 不检测就盲下 v3 会在老 QEMU/老虚拟机上报 "v3 microarchitecture support" 无法执行
+  if [ "$arch" = "amd64" ] && grep -qm1 avx2 /proc/cpuinfo 2>/dev/null \
+     && grep -qm1 bmi2 /proc/cpuinfo 2>/dev/null && grep -qm1 fma /proc/cpuinfo 2>/dev/null; then
+    fname="mihomo-linux-amd64-v3-${tag}.gz"
+    _info "CPU 支持 x86-64-v3 (AVX2/BMI2/FMA)，使用 v3 优化内核。"
+  else
+    fname="mihomo-linux-${arch}-${tag}.gz"
+    [ "$arch" = "amd64" ] && _info "CPU 不支持 x86-64-v3，使用 v1 兼容内核。"
+  fi
+  url="https://github.com/MetaCubeX/mihomo/releases/download/${tag}/${fname}"
   _info "下载 mihomo ${tag} (${arch})..."
   local tmp="${MIHOMO_DIR}/mihomo.dl.gz"
   if ! _fetch_gh "$url" "$tmp"; then

@@ -17,7 +17,7 @@
 umask 077
 export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin${PATH:+:$PATH}"
 
-SCRIPT_VERSION="1.4.2"
+SCRIPT_VERSION="1.4.3"
 MIHOMO_DIR="/etc/mihomo-lite"
 MIHOMO_BIN="/usr/local/bin/mihomo"
 CLOUDFLARED_BIN="/usr/local/bin/cloudflared"
@@ -112,6 +112,7 @@ _resolve_node_ip() {
   case "$ver" in
     v6)
       v6=$(_get_ip6); [ -n "$v6" ] && { printf '%s' "$v6"; return; }
+      _warn "该节点指定 IPv6，但当前未探测到可用 IPv6 地址，已回退 IPv4。" >&2
       _get_ip4
       ;;
     *)
@@ -432,6 +433,8 @@ _build_links() {
   : > "$links_file"
   {
     echo "# mihomo-lite 客户端配置（Clash/Mihomo 格式）自动生成"
+    echo "# 若节点使用 IPv6 地址，客户端顶层需要 ipv6: true 才能连通"
+    echo "ipv6: true"
     echo "proxies:"
   } > "$yaml_file"
   jq -c '.nodes[]?' "$METADATA_FILE" | while IFS= read -r n; do
@@ -495,7 +498,7 @@ _build_links() {
       mieru)
         local user pass transport
         user=$(jq -r '.username' <<<"$n"); pass=$(jq -r '.password' <<<"$n")
-        transport=$(jq -r '.transport // "TCP"' <<<"$n" | tr 'A-Z' 'a-z')
+        transport=$(jq -r '.transport // "TCP"' <<<"$n" | tr 'a-z' 'A-Z')
         # mieru 暂无通用分享链接规范，仅输出客户端 Clash 配置
         printf '  - name: "%s"\n    type: mieru\n    server: %s\n    port: %s\n    username: "%s"\n    password: "%s"\n    transport: %s\n' "$tag" "$ip" "$port" "$user" "$pass" "$transport" >> "$yaml_file"
         ;;
@@ -913,7 +916,11 @@ _add_anytls() {
 _add_mieru() {
   _ask_port "请输入 Mieru 端口" rand || return 1
   local port="$ASK_PORT_RESULT" user pass transport
-  read -rp "传输层 TCP/UDP [TCP]: " t; transport="${t^^}"; [[ "$transport" == "UDP" ]] || transport="TCP"
+  read -rp "传输层 1) TCP  2) UDP [1]: " t
+  case "${t^^}" in
+    2|UDP) transport="UDP" ;;
+    *) transport="TCP" ;;
+  esac
   user="u1"; pass=$(_gen_hex 16)
   read -rp "认证密码 [${pass}]: " p; pass="${p:-$pass}"
   _ask_ip_ver

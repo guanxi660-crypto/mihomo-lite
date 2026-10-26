@@ -17,7 +17,7 @@
 umask 077
 export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin${PATH:+:$PATH}"
 
-SCRIPT_VERSION="1.4.0"
+SCRIPT_VERSION="1.4.1"
 MIHOMO_DIR="/etc/mihomo-lite"
 MIHOMO_BIN="/usr/local/bin/mihomo"
 CLOUDFLARED_BIN="/usr/local/bin/cloudflared"
@@ -744,6 +744,16 @@ _restart_all() {
 # ---------------- 节点添加 ----------------
 _ask_port() {
   local prompt="$1" default="$2" p
+  # 默认端口随机化(参考 singbox-lite): 传 "rand" 时在 10000-65535 内挑一个空闲端口,
+  # 回车即用随机值, 也可手动输入覆盖
+  if [ "$default" = "rand" ]; then
+    local i rp
+    for i in $(seq 1 50); do
+      rp=$(shuf -i 10000-65535 -n 1 2>/dev/null || echo $(( (RANDOM % 55536) + 10000 )))
+      if ! _check_port_conflict "$rp"; then default="$rp"; break; fi
+    done
+    [ "$default" = "rand" ] && default=10000
+  fi
   read -rp "${prompt} [${default}]: " p
   p="${p:-$default}"
   if _check_port_conflict "$p"; then return 1; fi
@@ -752,7 +762,7 @@ _ask_port() {
 
 # [1] VLESS + Reality + Vision
 _add_vless_reality() {
-  _ask_port "请输入 VLESS-Reality 端口" 443 || return 1
+  _ask_port "请输入 VLESS-Reality 端口" rand || return 1
   local port="$ASK_PORT_RESULT" sni uuid pk pub sid enc=""
   sni=$(_pick_sni)
   read -rp "伪装 SNI [${sni}]: " s; sni="${s:-$sni}"
@@ -781,7 +791,7 @@ _add_vless_reality() {
 
 # [2] Hysteria2
 _add_hysteria2() {
-  _ask_port "请输入 Hysteria2 端口 (UDP)" 8443 || return 1
+  _ask_port "请输入 Hysteria2 端口 (UDP)" rand || return 1
   local port="$ASK_PORT_RESULT" sni pass obfs obfp cert masq
   sni=$(_pick_sni)
   read -rp "SNI [${sni}]: " s; sni="${s:-$sni}"
@@ -803,7 +813,7 @@ _add_hysteria2() {
 
 # [3] TUIC v5
 _add_tuic() {
-  _ask_port "请输入 TUIC v5 端口 (UDP)" 8444 || return 1
+  _ask_port "请输入 TUIC v5 端口 (UDP)" rand || return 1
   local port="$ASK_PORT_RESULT" sni uuid pass
   sni=$(_pick_sni)
   read -rp "SNI [${sni}]: " s; sni="${s:-$sni}"
@@ -821,7 +831,7 @@ _add_tuic() {
 
 # [4] AnyTLS
 _add_anytls() {
-  _ask_port "请输入 AnyTLS 端口" 8445 || return 1
+  _ask_port "请输入 AnyTLS 端口" rand || return 1
   local port="$ASK_PORT_RESULT" sni user pass
   sni=$(_pick_sni)
   read -rp "SNI [${sni}]: " s; sni="${s:-$sni}"
@@ -839,7 +849,7 @@ _add_anytls() {
 
 # [5] Mieru
 _add_mieru() {
-  _ask_port "请输入 Mieru 端口" 29101 || return 1
+  _ask_port "请输入 Mieru 端口" rand || return 1
   local port="$ASK_PORT_RESULT" user pass transport
   read -rp "传输层 TCP/UDP [TCP]: " t; transport="${t^^}"; [[ "$transport" == "UDP" ]] || transport="TCP"
   user="u1"; pass=$(_gen_hex 16)
@@ -855,7 +865,7 @@ _add_mieru() {
 
 # [6] Shadowsocks 2022
 _add_ss2022() {
-  _ask_port "请输入 SS2022 端口" 8388 || return 1
+  _ask_port "请输入 SS2022 端口" rand || return 1
   local port="$ASK_PORT_RESULT" cipher pass len
   echo "可选加密方式: 1) 2022-blake3-aes-128-gcm (16字节)  2) 2022-blake3-aes-256-gcm (32字节)  3) 2022-blake3-chacha20-poly1305 (32字节)"
   read -rp "选择 [1]: " c
@@ -881,7 +891,7 @@ _add_ss2022() {
 
 # [7] Trojan + Reality
 _add_trojan_reality() {
-  _ask_port "请输入 Trojan-Reality 端口" 8446 || return 1
+  _ask_port "请输入 Trojan-Reality 端口" rand || return 1
   local port="$ASK_PORT_RESULT" sni pass pk pub sid
   sni=$(_pick_sni)
   read -rp "伪装 SNI [${sni}]: " s; sni="${s:-$sni}"
@@ -911,7 +921,7 @@ _create_argo_ws_listener() {
   echo "1) VLESS + WS  2) VMess + WS"
   read -rp "选择 Argo 节点协议 [1]: " c
   [[ "$c" = "2" ]] && proto="vmess-ws" || proto="vless-ws"
-  _ask_port "本机 WS 监听端口 (Argo 回源端口, 仅 127.0.0.1)" 8001 || return 1
+  _ask_port "本机 WS 监听端口 (Argo 回源端口, 仅 127.0.0.1)" 8888 || return 1
   local port="$ASK_PORT_RESULT" uuid path
   uuid=$(_gen_uuid)
   path="/$(_gen_hex 8)"
@@ -1185,7 +1195,7 @@ _add_argo_node() {
   echo "1) VLESS + WS  2) VMess + WS"
   read -rp "选择 Argo 节点协议 [1]: " c
   [[ "$c" = "2" ]] && proto="vmess-ws" || proto="vless-ws"
-  _ask_port "本机 WS 监听端口 (Argo 回源端口, 仅 127.0.0.1)" 8001 || return 1
+  _ask_port "本机 WS 监听端口 (Argo 回源端口, 仅 127.0.0.1)" 8888 || return 1
   local port="$ASK_PORT_RESULT" uuid path
   uuid=$(_gen_uuid)
   path="/$(_gen_hex 8)"
@@ -1435,7 +1445,7 @@ main() {
     local mode token port
     mode=$(jq -r '.argo.mode // "temp"' "$METADATA_FILE")
     token=$(jq -r '.argo.token // ""' "$METADATA_FILE")
-    port=$(jq -r '.argo.port // 8001' "$METADATA_FILE")
+    port=$(jq -r '.argo.port // 8888' "$METADATA_FILE")
     [ "$mode" = "temp" ] && token=""
     _write_argo_runner "$mode" "$token" "$port"
   fi

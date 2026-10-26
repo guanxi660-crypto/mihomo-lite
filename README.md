@@ -6,6 +6,20 @@
 
 mihomo 内核多协议服务端一键管理脚本，交互风格参考 [singbox-lite](https://github.com/0xdabiaoge/singbox-lite)。
 
+## 🚀 一键安装
+
+```bash
+(curl -LfsS https://raw.githubusercontent.com/guanxi660-crypto/mihomo-lite/main/mihomo-lite.sh -o /usr/local/bin/mh || wget -q https://raw.githubusercontent.com/guanxi660-crypto/mihomo-lite/main/mihomo-lite.sh -O /usr/local/bin/mh) && chmod +x /usr/local/bin/mh && mh
+```
+
+脚本拉取不畅时用镜像：
+
+```bash
+(curl -LfsS https://gh-proxy.com/https://raw.githubusercontent.com/guanxi660-crypto/mihomo-lite/main/mihomo-lite.sh -o /usr/local/bin/mh || wget -q https://gh-proxy.com/https://raw.githubusercontent.com/guanxi660-crypto/mihomo-lite/main/mihomo-lite.sh -O /usr/local/bin/mh) && chmod +x /usr/local/bin/mh && mh
+```
+
+安装后随时以 root 运行 `mh` 进入管理菜单；脚本自身的更新用菜单 **【12 更新脚本】**。核心下载失败时可用 `GH_PROXY=镜像前缀 mh` 重试（如 `GH_PROXY=https://ghfast.top/ mh`）。
+
 ## 支持协议（mihomo listeners 服务端入站，字段已按官方 wiki 核实）
 
 | 协议 | 说明 |
@@ -19,6 +33,19 @@ mihomo 内核多协议服务端一键管理脚本，交互风格参考 [singbox-
 | Trojan + Reality | 无需证书 |
 | VLESS / VMess + WS + Argo | 临时隧道（自动探测域名）或固定隧道（Token） |
 
+## 功能
+
+- 中文交互菜单：添加 / 删除 / **修改**节点、查看链接、重启 / 停止、状态、日志、卸载
+- 节点默认命名「国家-运营商-协议」，可自定义覆盖
+- 对外端口默认随机空闲端口（避免撞车），Argo 回源端口固定 8888（仅监听 127.0.0.1）
+- 节点可选对外 **IPv4 / IPv6**：双栈机器添加时选择、单栈机器自动采用，纯 IPv6 机器自动以 `::` 监听
+- 按 CPU 能力选择内核（x86-64-v3 优化版 / compatible 兼容版），老 CPU 可正常运行
+- 复用本机已有 cloudflared，不覆盖、不破坏原有 Cloudflare 部署
+- 分享链接输出（`/etc/mihomo-lite/sub/links.txt`）+ Clash/Mihomo 客户端配置（`sub/clash.yaml`）
+- 支持 systemd / OpenRC / 无 init 直跑三种模式
+- 重启前 `mihomo -t` 配置校验 + 启动后存活兜底检查
+- SS2022 严格长度密钥校验（避免运行期 `decode psk` 错误）
+
 ## Argo 隧道
 
 cloudflared 使用 `--protocol auto`：**优先 QUIC，连接失败自动回退 http2(TCP)**。
@@ -27,28 +54,6 @@ cloudflared 使用 `--protocol auto`：**优先 QUIC，连接失败自动回退 
 ```bash
 ARGO_PROTOCOL=http2 bash mihomo-lite.sh
 ```
-
-## 安装
-
-```bash
-(curl -LfsS https://raw.githubusercontent.com/guanxi660-crypto/mihomo-lite/main/mihomo-lite.sh -o /usr/local/bin/mh || wget -q https://raw.githubusercontent.com/guanxi660-crypto/mihomo-lite/main/mihomo-lite.sh -O /usr/local/bin/mh) && chmod +x /usr/local/bin/mh && mh
-```
-
-脚本拉取不畅时用镜像：
-
-```bash
-(curl -LfsS https://gh-proxy.com/https://raw.githubusercontent.com/guanxi660-crypto/mihomo-lite/main/mihomo-lite.sh -o /usr/local/bin/mh || wget -q https://gh-proxy.com/https://raw.githubusercontent.com/guanxi660-crypto/mihomo-lite/main/mihomo-lite.sh -O /usr/local/bin/mh) && chmod +x /usr/local/bin/mh && mh
-```
-
-安装后随时以 root 运行 `mh` 进入管理菜单；脚本更新用菜单【11 更新脚本】。核心下载失败时可用 `GH_PROXY=镜像前缀 mh` 重试（如 `GH_PROXY=https://ghfast.top/ mh`）。
-
-## 功能
-
-- 中文交互菜单：添加/删除节点、查看链接、重启/停止、状态、日志、卸载
-- 分享链接输出（`/etc/mihomo-lite/sub/links.txt`）+ Clash/Mihomo 客户端配置（`sub/clash.yaml`）
-- 支持 systemd / OpenRC / 无 init 直跑三种模式
-- 重启前 `mihomo -t` 配置校验 + 启动后存活兜底检查
-- SS2022 严格长度密钥校验（避免运行期 `decode psk` 错误）
 
 ## 关于订阅
 

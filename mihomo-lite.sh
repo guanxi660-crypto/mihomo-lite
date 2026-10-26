@@ -17,7 +17,7 @@
 umask 077
 export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin${PATH:+:$PATH}"
 
-SCRIPT_VERSION="1.4.4"
+SCRIPT_VERSION="1.4.5"
 MIHOMO_DIR="/etc/mihomo-lite"
 MIHOMO_BIN="/usr/local/bin/mihomo"
 CLOUDFLARED_BIN="/usr/local/bin/cloudflared"
@@ -1371,19 +1371,29 @@ _update_script() {
   local target="/usr/local/bin/mh"
   # 已装到常驻路径则原地更新，否则安装到 /usr/local/bin/mh
   [ -x "$SELF_SCRIPT_PATH" ] && [[ "$SELF_SCRIPT_PATH" == /usr/local/bin/* ]] && target="$SELF_SCRIPT_PATH"
-  _info "更新脚本: ${GITHUB_RAW_URL} → ${target}"
+  local cur_ver="$SCRIPT_VERSION"
+  # 附加时间戳参数穿透 raw.githubusercontent 的 CDN 缓存(否则会拿到几分钟前的旧文件)
+  local bust="?t=$(date +%s)"
+  local url="${GITHUB_RAW_URL}${bust}"
+  _info "更新脚本: ${GITHUB_RAW_URL} → ${target} (当前 v${cur_ver})"
   local mirror="${GH_PROXY:-https://gh-proxy.com/}"
   local tmp="${MIHOMO_DIR}/mh.update"
   rm -f "$tmp"
-  _fetch "$GITHUB_RAW_URL" "$tmp" || _fetch "${mirror}${GITHUB_RAW_URL}" "$tmp"
+  _fetch "$url" "$tmp" || _fetch "${mirror}${url}" "$tmp" || _fetch "https://ghfast.top/${url}" "$tmp"
   if ! { [ -s "$tmp" ] && head -n1 "$tmp" | grep -q "^#!/bin/bash" && bash -n "$tmp" 2>/dev/null; }; then
     _error "脚本下载或校验失败，未做任何更改。"
     rm -f "$tmp"
     return 1
   fi
+  local new_ver
+  new_ver=$(grep -m1 '^SCRIPT_VERSION=' "$tmp" | cut -d'"' -f2)
   chmod +x "$tmp"
   mv -f "$tmp" "$target"
-  _success "脚本已更新到 ${target}，重新运行 mh 生效。"
+  if [ -n "$new_ver" ] && [ "$new_ver" = "$cur_ver" ]; then
+    _warn "远端版本仍是 v${new_ver}，已按最新内容覆盖 ${target}（若刚发版请等 1-2 分钟后重试）。"
+  else
+    _success "脚本已更新: v${cur_ver} → v${new_ver:-未知}，重新运行 mh 生效。"
+  fi
 }
 
 # ---------------- 卸载 ----------------

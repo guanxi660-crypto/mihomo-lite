@@ -17,7 +17,7 @@
 umask 077
 export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin${PATH:+:$PATH}"
 
-SCRIPT_VERSION="1.4.5"
+SCRIPT_VERSION="1.5.0"
 MIHOMO_DIR="/etc/mihomo-lite"
 MIHOMO_BIN="/usr/local/bin/mihomo"
 CLOUDFLARED_BIN="/usr/local/bin/cloudflared"
@@ -259,6 +259,33 @@ _emit_listener() {
   local tag proto port
   tag=$(jq -r '.tag' <<<"$n"); proto=$(jq -r '.proto' <<<"$n"); port=$(jq -r '.port' <<<"$n")
   case "$proto" in
+    vless-xhttp)
+      local xuuid xpk xsid xsni xpath xmode
+      xuuid=$(jq -r '.uuid' <<<"$n"); xpk=$(jq -r '.private_key' <<<"$n")
+      xsid=$(jq -r '.short_id' <<<"$n"); xsni=$(jq -r '.sni' <<<"$n")
+      xpath=$(jq -r '.ws_path // "/"' <<<"$n"); xmode=$(jq -r '.xhttp_mode // "auto"' <<<"$n")
+      cat <<EOF
+  - name: "${tag}"
+    type: vless
+    port: ${port}
+    listen: ${LISTEN_ADDR}
+    udp: true
+    users:
+      - username: "u1"
+        uuid: "${xuuid}"
+    xhttp-config:
+      path: "${xpath}"
+      mode: ${xmode}
+      x-padding-bytes: "100-1000"
+    reality-config:
+      dest: "${xsni}:443"
+      private-key: "${xpk}"
+      short-id:
+        - "${xsid}"
+      server-names:
+        - "${xsni}"
+EOF
+      ;;
     vless-reality)
       local uuid pk sid sni flow enc
       uuid=$(jq -r '.uuid' <<<"$n"); pk=$(jq -r '.private_key' <<<"$n")
@@ -447,6 +474,31 @@ _build_links() {
     if [[ "$ip" == *:* ]]; then host="[$ip]"; else host="$ip"; fi
     enc_tag=$(_b64_nopad "$tag")
     case "$proto" in
+      vless-xhttp)
+        local xuuid xpbk xsid xsni xpath xmode
+        xuuid=$(jq -r '.uuid' <<<"$n"); xpbk=$(jq -r '.public_key' <<<"$n")
+        xsid=$(jq -r '.short_id' <<<"$n"); xsni=$(jq -r '.sni' <<<"$n")
+        xpath=$(jq -r '.ws_path // "/"' <<<"$n"); xmode=$(jq -r '.xhttp_mode // "auto"' <<<"$n")
+        # XHTTP 与 Vision 互斥(flow 必须留空)，链接用 type=xhttp + mode 参数
+        link="vless://${xuuid}@${host}:${port}?encryption=none&security=reality&sni=${xsni}&fp=chrome&pbk=${xpbk}&sid=${xsid}&type=xhttp&path=$(_url_encode "$xpath")&mode=${xmode}#${enc_tag}"
+        printf '  - name: "%s"
+    type: vless
+    server: "%s"
+    port: %s
+    uuid: %s
+    udp: true
+    tls: true
+    servername: %s
+    client-fingerprint: chrome
+    network: xhttp
+    xhttp-opts:
+      path: "%s"
+      mode: %s
+    reality-opts:
+      public-key: %s
+      short-id: "%s"
+' "$tag" "$ip" "$port" "$xuuid" "$xsni" "$xpath" "$xmode" "$xpbk" "$xsid" >> "$yaml_file"
+        ;;
       vless-reality)
         local uuid pbk sid sni
         uuid=$(jq -r '.uuid' <<<"$n"); pbk=$(jq -r '.public_key' <<<"$n")
@@ -821,7 +873,41 @@ _ask_port() {
   ASK_PORT_RESULT="$p"
 }
 
-# [1] VLESS + Reality + Vision
+# [1] VLESS + XHTTP + Reality（首选：XHTTP 把流量拆成标准 HTTP 请求序列，抗主动探测强，可套 CDN）
+_add_vless_xhttp() {
+  _ask_port "请输入 VLESS-XHTTP-Reality 端口" rand || return 1
+  local port="$ASK_PORT_RESULT" sni uuid pk pub sid path mode
+  sni=$(_pick_sni)
+  read -rp "伪装 SNI [${sni}]: " s; sni="${s:-$sni}"
+  uuid=$(_gen_uuid)
+  local kp
+  kp=$("${MIHOMO_BIN}" generate reality-keypair 2>/dev/null)
+  pk=$(awk '/PrivateKey/{print $2}' <<<"$kp")
+  pub=$(awk '/PublicKey/{print $2}' <<<"$kp")
+  [ -z "$pk" ] || [ -z "$pub" ] && { _error "Reality 密钥对生成失败。"; return 1; }
+  sid=$(_gen_hex 4)
+  # 随机路径，防御固定路径指纹
+  path="/$(_gen_hex 6)"
+  read -rp "XHTTP 路径 [${path}]: " p; path="${p:-$path}"
+  echo "传输模式: 1) auto (推荐, 自动选 stream-up/packet-up)  2) packet-up  3) stream-up"
+  read -rp "选择 [1]: " m
+  case "$m" in
+    2) mode="packet-up" ;;
+    3) mode="stream-up" ;;
+    *) mode="auto" ;;
+  esac
+  _ask_ip_ver
+  _ask_node_name "VLESS-XHTTP"
+  local node
+  node=$(jq -cn --arg tag "vless-x-${port}" --arg name "$NODE_NAME" --arg port "$port" --arg ipver "$IP_VER" \
+    --arg uuid "$uuid" --arg pk "$pk" --arg pub "$pub" --arg sid "$sid" --arg sni "$sni" \
+    --arg path "$path" --arg mode "$mode" \
+    '{tag:$tag,name:$name,ip_ver:$ipver,proto:"vless-xhttp",port:($port|tonumber),uuid:$uuid,private_key:$pk,public_key:$pub,short_id:$sid,sni:$sni,ws_path:$path,xhttp_mode:$mode}')
+  _add_node_meta "$node"
+  _regen_config; _restart_all; _show_links
+}
+
+# [2] VLESS + TCP + Reality + Vision
 _add_vless_reality() {
   _ask_port "请输入 VLESS-Reality 端口" rand || return 1
   local port="$ASK_PORT_RESULT" sni uuid pk pub sid enc=""
@@ -1069,6 +1155,17 @@ _modify_node_menu() {
   local sni uuid pass obfp path domain
   local filter=""
   case "$proto" in
+    vless-xhttp)
+      sni=$(jq -r --argjson i "$idx" '.nodes[$i].sni // ""' "$METADATA_FILE")
+      read -rp "伪装 SNI [${sni}]: " v; sni="${v:-$sni}"
+      uuid=$(jq -r --argjson i "$idx" '.nodes[$i].uuid' "$METADATA_FILE")
+      read -rp "重新生成 UUID? [y/N]: " u
+      [[ "$u" =~ ^[Yy]$ ]] && uuid=$(_gen_uuid)
+      path=$(jq -r --argjson i "$idx" '.nodes[$i].ws_path // "/"' "$METADATA_FILE")
+      read -rp "重新生成 XHTTP 路径? [y/N]: " u
+      [[ "$u" =~ ^[Yy]$ ]] && path="/$(_gen_hex 6)"
+      filter=' | .sni = $sni | .uuid = $uuid | .ws_path = $path'
+      ;;
     vless-reality)
       sni=$(jq -r --argjson i "$idx" '.nodes[$i].sni // ""' "$METADATA_FILE")
       read -rp "伪装 SNI [${sni}]: " v; sni="${v:-$sni}"
@@ -1439,7 +1536,7 @@ _menu_status() {
 _show_menu() {
   echo ""
   echo -e "${GREEN}======== mihomo-lite 管理脚本 v${SCRIPT_VERSION} ========${NC}"
-  echo " 1. 添加节点 (Reality/HY2/TUIC/AnyTLS/Mieru/SS2022/Trojan)"
+  echo " 1. 添加节点 (XHTTP-Reality/Reality/HY2/TUIC/AnyTLS/Mieru/SS2022/Trojan)"
   echo " 2. Argo 隧道管理 (添加/删除节点与隧道, protocol=auto QUIC优先)"
   echo " 3. 查看节点链接"
   echo " 4. 删除节点"
@@ -1482,19 +1579,21 @@ _main_menu() {
             _warn "未安装核心，节点添加后将无法运行。"
           fi
         fi
-        echo " 1) VLESS+Reality+Vision"
-        echo " 2) Hysteria2"
-        echo " 3) TUIC v5"
-        echo " 4) AnyTLS"
-        echo " 5) Mieru"
-        echo " 6) SS2022"
-        echo " 7) Trojan+Reality"
+        echo " 1) VLESS+XHTTP+Reality  【推荐·首选】"
+        echo " 2) VLESS+Reality+Vision (TCP)"
+        echo " 3) Hysteria2"
+        echo " 4) TUIC v5"
+        echo " 5) AnyTLS"
+        echo " 6) Mieru"
+        echo " 7) SS2022"
+        echo " 8) Trojan+Reality"
         echo " 0) 返回"
         read -rp "协议: " p
         case "$p" in
-          1) _add_vless_reality ;; 2) _add_hysteria2 ;; 3) _add_tuic ;;
-          4) _add_anytls ;; 5) _add_mieru ;; 6) _add_ss2022 ;;
-          7) _add_trojan_reality ;;
+          1) _add_vless_xhttp ;; 2) _add_vless_reality ;;
+          3) _add_hysteria2 ;; 4) _add_tuic ;;
+          5) _add_anytls ;; 6) _add_mieru ;; 7) _add_ss2022 ;;
+          8) _add_trojan_reality ;;
           0) ;;
           *) _error "无效输入。" ;;
         esac

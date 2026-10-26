@@ -48,9 +48,9 @@ _check_root() {
 _install_dependencies() {
   # 必要组件清单: 命令 → 包名(Debian/Alpine 通用, 差异处单独处理)
   # curl/jq/openssl 基础三件套; ss(iproute2) 端口检测; pgrep(procps) 进程检测;
-  # shuf/readlink(coreutils) 随机SNI与脚本路径; bash 为脚本本体运行环境
+  # timeout/tee/seq/base64/shuf/readlink(coreutils); bash 为脚本本体运行环境
   local missing="" c
-  for c in curl jq openssl ss pgrep shuf readlink bash; do
+  for c in curl jq openssl ss pgrep shuf readlink bash timeout tee; do
     command -v "$c" >/dev/null 2>&1 || missing="$missing $c"
   done
   # ca-certificates 无命令可查，检测证书目录
@@ -59,19 +59,19 @@ _install_dependencies() {
   _info "检测到缺少必要组件:$missing，正在安装..."
   if command -v apt >/dev/null 2>&1; then
     apt-get update -y >/dev/null 2>&1
-    apt-get install -y --no-install-recommends curl jq openssl iproute2 procps coreutils bash ca-certificates cron >/dev/null 2>&1
+    apt-get install -y --no-install-recommends curl jq openssl iproute2 procps coreutils bash ca-certificates >/dev/null 2>&1
   elif command -v apk >/dev/null 2>&1; then
     apk add --no-cache curl jq openssl iproute2 procps coreutils bash ca-certificates 2>/dev/null || apk add --no-cache curl jq openssl
   elif command -v dnf >/dev/null 2>&1; then
-    dnf install -y curl jq openssl iproute2 procps coreutils bash ca-certificates cronie >/dev/null 2>&1
+    dnf install -y curl jq openssl iproute2 procps coreutils bash ca-certificates >/dev/null 2>&1
   elif command -v yum >/dev/null 2>&1; then
-    yum install -y curl jq openssl iproute2 procps coreutils bash ca-certificates cronie >/dev/null 2>&1
+    yum install -y curl jq openssl iproute2 procps coreutils bash ca-certificates >/dev/null 2>&1
   else
     _error "无法识别的包管理器，请手动安装:$missing"; return 1
   fi
   # 安装后逐一复核，缺一样就拒绝继续，避免半残环境跑出难排查的问题
   missing=""
-  for c in curl jq openssl ss pgrep shuf readlink bash; do
+  for c in curl jq openssl ss pgrep shuf readlink bash timeout tee; do
     command -v "$c" >/dev/null 2>&1 || missing="$missing $c"
   done
   if [ -n "$missing" ]; then

@@ -17,7 +17,7 @@
 umask 077
 export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin${PATH:+:$PATH}"
 
-SCRIPT_VERSION="1.5.0"
+SCRIPT_VERSION="1.5.1"
 MIHOMO_DIR="/etc/mihomo-lite"
 MIHOMO_BIN="/usr/local/bin/mihomo"
 CLOUDFLARED_BIN="/usr/local/bin/cloudflared"
@@ -682,8 +682,11 @@ install_cloudflared() {
   local existing
   existing=$(_cloudflared_bin) && { _info "检测到本机已有 cloudflared (${existing})，直接复用，不重新下载。"; return 0; }
   local arch; arch=$(_detect_arch) || return 1
+  # cloudflared 的 ARM 32 位资产名是 linux-arm（不是 armv7），需单独映射
+  local cf_arch="$arch"
+  [ "$arch" = "armv7" ] && cf_arch="arm"
   _info "下载 cloudflared (${arch})..."
-  local url="https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-${arch}"
+  local url="https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-${cf_arch}"
   local mirror="${GH_PROXY:-https://gh-proxy.com/}"
   rm -f "${CLOUDFLARED_BIN}.new"
   _fetch "$url" "${CLOUDFLARED_BIN}.new" 2>/dev/null

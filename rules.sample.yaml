@@ -1,0 +1,116 @@
+# ============================================================
+# mihomo-lite 服务端出站分流模板（海外 VPS 服务端用）
+#
+# 适用场景：这台机器是「入口/中转」，希望把入站流量按规则送到不同出口：
+#   · DIRECT          → 本机直接出网（单机落地默认就是这样跑）
+#   · 上游落地节点     → 把流量转给另一台机器（落地机/家宽/流媒体解锁机）
+#   · proxy-providers → 从订阅拉一批落地节点，自动选延迟最低的
+#
+# 三种分流手段（可单用也可叠加）：
+#   1) rules          全局出站规则：按域名/IP/端口/GEOIP 决定走哪个策略组
+#   2) listener.proxy 单个入站定向：在某个 listener 里写 proxy: 组名，
+#                    该节点的流量固定走这条出口（优先级高于 rules）
+#   3) proxy-groups   策略组：select 手动切、url-test/fallback 自动选
+#
+# 用法：
+#   a. 把本文件的 proxy-providers / proxies / proxy-groups / rules 段
+#      合并进 /etc/mihomo-lite/config.yaml（listeners 段保持不动）
+#   b. 校验：mihomo -t -d /etc/mihomo-lite -f /etc/mihomo-lite/config.yaml
+#   c. 生效：systemctl restart mihomo-lite
+#   d. 改坏了看 mh 菜单【9 日志】；删掉本文件相关段即恢复全 DIRECT
+#
+# 注意：服务端不需要 fake-ip / DNS 分流 / 7890 混合端口，那些是客户端的事。
+# ============================================================
+
+# ---------- 上游落地节点（A/B 二选一，也可都用） ----------
+# A. 订阅源自动拉取（推荐，节点变动自动跟随）
+proxy-providers:
+  landing:
+    type: http
+    url: "https://example.com/your-subscription"   # ← 换成落地机订阅地址
+    interval: 3600
+    path: ./providers/landing.yaml
+    health-check:
+      enable: true
+      url: "http://www.gstatic.com/generate_204"
+      interval: 300
+
+# B. 手写落地节点：把 [] 换成真实 proxies 列表（格式同 sub/clash.yaml）
+proxies: []
+
+# ---------- 策略组 ----------
+proxy-groups:
+  # 全局出口选择器：rules 末尾 MATCH 指向它，手动一键切换全部流量出口
+  - name: "🔀 出口"
+    type: select
+    proxies:
+      - DIRECT
+      - "🌐 直连优先"
+      - "⚡ 最快落地"
+      - "🎬 流媒体落地"
+
+  # 直连优先：本机直出；直连探测失败才转落地（中转机常用）
+  - name: "🌐 直连优先"
+    type: fallback
+    proxies:
+      - DIRECT
+      - "⚡ 最快落地"
+    url: "http://www.gstatic.com/generate_204"
+    interval: 300
+
+  # 从订阅里自动挑延迟最低的落地机
+  - name: "⚡ 最快落地"
+    type: url-test
+    use:
+      - landing
+    url: "http://www.gstatic.com/generate_204"
+    interval: 300
+    tolerance: 50
+
+  # 流媒体解锁专用：手动指定能解锁的落地节点
+  - name: "🎬 流媒体落地"
+    type: select
+    use:
+      - landing
+    proxies:
+      - DIRECT
+
+# ---------- 出站规则（自上而下命中即停） ----------
+rules:
+  # 1) 私有网段/回环不回隧道
+  - IP-CIDR,127.0.0.0/8,DIRECT,no-resolve
+  - IP-CIDR,10.0.0.0/8,DIRECT,no-resolve
+  - IP-CIDR,172.16.0.0/12,DIRECT,no-resolve
+  - IP-CIDR,192.168.0.0/16,DIRECT,no-resolve
+  - IP-CIDR,100.64.0.0/10,DIRECT,no-resolve
+
+  # 2) 落地机自身 IP 必须直连，否则流量回环进隧道
+  # - IP-CIDR,203.0.113.10/32,DIRECT,no-resolve
+
+  # 3) 指定目标走特定出口（流媒体解锁示例）
+  # - DOMAIN-SUFFIX,netflix.com,🎬 流媒体落地
+  # - DOMAIN-SUFFIX,disneyplus.com,🎬 流媒体落地
+
+  # 4) 目的地是中国大陆 → 本机直连（回国中转场景把这条改成走落地）
+  - GEOIP,CN,DIRECT
+
+  # 5) 其余全部交给出口选择器
+  - MATCH,🔀 出口
+
+# ============================================================
+# 单节点定向（可选，写在 config.yaml 的 listeners 段内，不改本文件）：
+#
+# listeners:
+#   - name: "vless-x-4430"
+#     type: vless
+#     port: 4430
+#     proxy: "🎬 流媒体落地"     # ← 这个入口的流量固定走解锁机
+#     users:
+#       - username: "u1"
+#         uuid: "..."
+#
+# 要点：
+#   · listener 的 proxy 优先于 rules，适合「一个入口一个用途」（如 443 解锁、8443 直连）
+#   · 落地节点不能再指回本机入口，否则死循环
+#   · 加完规则记得 mihomo -t 校验，通过后再 restart
+# ============================================================

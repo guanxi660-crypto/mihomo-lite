@@ -10,14 +10,14 @@
 #   5. Mieru
 #   6. Shadowsocks 2022
 #   7. Trojan + Reality
-#   8. VLESS/VMess + WS + Argo 隧道（cloudflared --protocol auto：优先 QUIC，连不上自动回退 http2）
+#   8. VLESS/VMess + WS + Argo 隧道（cloudflared 默认 http2/TCP，启动失败自动改用 QUIC）
 # 支持: Debian/Ubuntu(systemd) / Alpine(OpenRC) / 无 init 直跑模式
 # 需 root 权限运行
 #=============================================================================
 umask 077
 export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin${PATH:+:$PATH}"
 
-SCRIPT_VERSION="1.5.1"
+SCRIPT_VERSION="1.5.2"
 MIHOMO_DIR="/etc/mihomo-lite"
 MIHOMO_BIN="/usr/local/bin/mihomo"
 CLOUDFLARED_BIN="/usr/local/bin/cloudflared"
@@ -767,22 +767,34 @@ EOF
 }
 
 # 直跑模式 / systemd 辅助启动脚本（固定隧道与临时隧道共用）
-# 协议选择：默认 auto（优先 QUIC，连接失败自动回退 http2/TCP）。
-# 如所在环境 UDP 被劫持导致 QUIC 数据面静默失效（注册成功但边缘 530），
-# 可用环境变量 ARGO_PROTOCOL=http2 强制 TCP，脚本无需改动。
+# 协议选择：默认先用 http2(TCP)，启动后 20 秒内退出则自动改用 quic 重试。
+# 也可用环境变量 ARGO_PROTOCOL 指定单一协议（http2 / quic / auto），此时不做回退。
 _write_argo_runner() {
   local mode="$1" token="$2" port="$3"
-  local proto="${ARGO_PROTOCOL:-auto}"
+  local proto_list="${ARGO_PROTOCOL:-http2 quic}"
   local cfbin
   cfbin=$(_cloudflared_bin) || { _error "cloudflared 未安装。"; return 1; }
   {
     echo "#!/bin/bash"
     echo "exec > >(tee -a '${ARGO_LOG}') 2>&1"
+    echo "PROTO_LIST='${proto_list}'"
+    echo "for p in \$PROTO_LIST; do"
+    echo "  echo \"[argo] 启动 cloudflared, 协议: \$p\""
     if [ "$mode" = "token" ]; then
-      echo "exec ${cfbin} tunnel --no-autoupdate --protocol '${proto}' --token '${token}'"
+      echo "  ${cfbin} tunnel --no-autoupdate --protocol \"\$p\" --token '${token}' &"
     else
-      echo "exec ${cfbin} tunnel --no-autoupdate --protocol '${proto}' --url http://127.0.0.1:${port}"
+      echo "  ${cfbin} tunnel --no-autoupdate --protocol \"\$p\" --url http://127.0.0.1:${port} &"
     fi
+    echo "  pid=\$!"
+    echo "  sleep 20"
+    echo "  if kill -0 \$pid 2>/dev/null; then"
+    echo "    wait \$pid; exit \$?"
+    echo "  fi"
+    echo "  echo \"[argo] 协议 \$p 在 20 秒内退出, 切换下一个协议重试\""
+    echo "  wait \$pid 2>/dev/null"
+    echo "done"
+    echo "echo '[argo] 所有协议均启动失败'"
+    echo "exit 1"
   } > "${MIHOMO_DIR}/run-argo.sh"
   chmod 700 "${MIHOMO_DIR}/run-argo.sh"
 }
@@ -1074,7 +1086,7 @@ _add_trojan_reality() {
 }
 
 # ---------------- Argo 隧道节点 ----------------
-# 说明：cloudflared 使用 --protocol auto，默认优先 QUIC，被墙/UDP 不通时自动回退 http2(TCP)
+# 说明：cloudflared 默认 --protocol http2(TCP, 最稳)，若启动失败自动改用 --protocol quic 重试
 
 # 创建本机 WS 监听节点（Argo 回源用），供新隧道与复用已有隧道两条路径共用
 _create_argo_ws_listener() {
@@ -1528,7 +1540,7 @@ _menu_status() {
   fi
   _service_active "$SERVICE_NAME" && _success "mihomo 核心运行中" || _warn "mihomo 核心未运行"
   if jq -e '.argo.enabled == true' "$METADATA_FILE" >/dev/null 2>&1; then
-    _service_active "$ARGO_SERVICE_NAME" && _success "Argo 隧道运行中 (protocol=auto)" || _warn "Argo 隧道未运行"
+    _service_active "$ARGO_SERVICE_NAME" && _success "Argo 隧道运行中 (默认 http2, 失败回退 quic)" || _warn "Argo 隧道未运行"
     local d; d=$(jq -r '.argo.domain // ""' "$METADATA_FILE")
     [ -n "$d" ] && echo "Argo 域名: ${d}"
   fi
@@ -1540,7 +1552,7 @@ _show_menu() {
   echo ""
   echo -e "${GREEN}======== mihomo-lite 管理脚本 v${SCRIPT_VERSION} ========${NC}"
   echo " 1. 添加节点 (XHTTP-Reality/Reality/HY2/TUIC/AnyTLS/Mieru/SS2022/Trojan)"
-  echo " 2. Argo 隧道管理 (添加/删除节点与隧道, protocol=auto QUIC优先)"
+  echo " 2. Argo 隧道管理 (添加/删除节点与隧道, 默认http2失败回退QUIC)"
   echo " 3. 查看节点链接"
   echo " 4. 删除节点"
   echo " 5. 修改节点"

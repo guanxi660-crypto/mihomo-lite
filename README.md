@@ -1,6 +1,6 @@
 # mihomo-lite
 
-> 版本：v1.5.1
+> 版本：v1.5.2
 >
 > **⚠️ 测试阶段（BETA）**：本项目当前处于测试阶段，功能与配置格式可能随时调整，请勿在生产环境使用。
 
@@ -50,11 +50,14 @@ mihomo 内核多协议服务端一键管理脚本，交互风格参考 [singbox-
 
 ## Argo 隧道
 
-cloudflared 使用 `--protocol auto`：**优先 QUIC，连接失败自动回退 http2(TCP)**。
-特殊环境下（如 UDP 被劫持导致 QUIC 静默失效）可用环境变量强制 TCP：
+cloudflared 默认使用 `--protocol http2`（TCP，最稳）；**若隧道启动失败，脚本会自动改用 `--protocol quic` 重试**（启动后 20 秒内退出即判定失败，依次尝试 http2 → quic）。
+
+需要固定单一协议时可指定环境变量（不再自动回退）：
 
 ```bash
-ARGO_PROTOCOL=http2 bash mihomo-lite.sh
+ARGO_PROTOCOL=quic bash mihomo-lite.sh     # 强制 QUIC
+ARGO_PROTOCOL=http2 bash mihomo-lite.sh    # 强制 http2
+ARGO_PROTOCOL=auto bash mihomo-lite.sh     # 交给 cloudflared 自选
 ```
 
 ## 关于订阅

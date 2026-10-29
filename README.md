@@ -1,6 +1,6 @@
 # mihomo-lite
 
-> 版本：v1.6.0
+> 版本：v1.5.2
 >
 > **⚠️ 测试阶段（BETA）**：本项目当前处于测试阶段，功能与配置格式可能随时调整，请勿在生产环境使用。
 
@@ -47,31 +47,6 @@ mihomo 内核多协议服务端一键管理脚本，交互风格参考 [singbox-
 - 支持 systemd / OpenRC / 无 init 直跑三种模式
 - 重启前 `mihomo -t` 配置校验 + 启动后存活兜底检查
 - SS2022 严格长度密钥校验（避免运行期 `decode psk` 错误）
-
-## 服务端分流（中转 / 落地）
-
-仓库根目录的 [`rules.sample.yaml`](rules.sample.yaml) 是**服务端出站分流模板**（不是客户端规则模板）：把入站流量按规则送到不同出口，适合「入口机 → 落地机」或「部分流量走解锁机」的中转场景。
-
-三种分流手段，可单用也可叠加：
-
-| 手段 | 位置 | 作用 |
-|---|---|---|
-| `rules` | 全局 | 按域名 / IP / GEOIP 决定流量走哪个策略组 |
-| `listener` 的 `proxy:` | 单个入站 | 该节点流量固定走某条出口，**优先级高于 rules** |
-| `proxy-groups` | 全局 | `select` 手动切、`url-test` / `fallback` 自动选 |
-
-用法：
-
-```bash
-# 1. 把模板里的 proxy-providers / proxies / proxy-groups / rules 段合并进服务端配置
-#    （listeners 段保持不动，改前建议先备份 config.yaml）
-# 2. 校验
-mihomo -t -d /etc/mihomo-lite -f /etc/mihomo-lite/config.yaml
-# 3. 生效
-systemctl restart mihomo-lite
-```
-
-模板默认 `GEOIP,CN → DIRECT`、其余走「🔀 出口」选择器；删掉相关段即可恢复全部 DIRECT（原状）。落地机自身 IP 记得加 `DIRECT` 规则，否则流量会回环进隧道。
 
 ## Argo 隧道
 

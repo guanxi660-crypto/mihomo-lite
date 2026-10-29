@@ -17,7 +17,7 @@
 umask 077
 export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin${PATH:+:$PATH}"
 
-SCRIPT_VERSION="1.5.2"
+SCRIPT_VERSION="1.5.3"
 MIHOMO_DIR="/etc/mihomo-lite"
 MIHOMO_BIN="/usr/local/bin/mihomo"
 CLOUDFLARED_BIN="/usr/local/bin/cloudflared"
@@ -134,17 +134,23 @@ _listen_addr() {
 
 # 询问对外 IP 版本; 只有单栈时静默采用, 结果存 IP_VER
 _ask_ip_ver() {
-  local v4 v6
+  local v4 v6 iv
   v4=$(_get_ip4); v6=$(_get_ip6)
   if [ -n "$v4" ] && [ -n "$v6" ]; then
     echo "本机双栈可用: IPv4=${v4}  IPv6=${v6}"
-    read -rp "对外 IP 版本 (4/6) [4]: " iv
-    IP_VER=$([ "$iv" = "6" ] && echo v6 || echo v4)
+    read -rp "对外 IP 版本 (4/6) [4]: " iv || iv=""
+    iv=$(printf '%s' "${iv%$'\r'}" | tr -d '[:space:]')
+    case "$iv" in
+      6|v6|V6) IP_VER="v6" ;;
+      4|v4|V4|"") IP_VER="v4" ;;
+      *) _warn "输入 '${iv}' 无法识别，按 IPv4 处理。"; IP_VER="v4" ;;
+    esac
   elif [ -n "$v6" ]; then
     IP_VER="v6"; _info "检测到仅 IPv6，节点使用 IPv6 地址。"
   else
     IP_VER="v4"
   fi
+  _info "对外 IP 版本: ${IP_VER}"
 }
 
 _detect_init_system() {
@@ -173,11 +179,19 @@ _geo_node_name() {
 }
 
 # 节点命名交互: 传协议显示名, 结果存 NODE_NAME
+# 注意: 输入被吞(空行/EOF/paste 带 \r)时不能静默用默认名, 这里会去掉 \r 和首尾空白并回显最终名称
 _ask_node_name() {
-  local def
+  local def nm
   def=$(_geo_node_name "$1")
-  read -rp "节点名称 [${def}]: " nm || return 0
-  NODE_NAME="${nm:-$def}"
+  read -rp "节点名称 [${def}]: " nm || nm=""
+  nm=${nm%$'\r'}
+  nm=$(printf '%s' "$nm" | sed 's/^[[:space:]]*//; s/[[:space:]]*$//')
+  if [ -n "$nm" ] && [ "$nm" != "$def" ]; then
+    NODE_NAME="$nm"
+  else
+    NODE_NAME="$def"
+  fi
+  _info "节点名称: ${NODE_NAME}"
 }
 
 _check_port_conflict() {

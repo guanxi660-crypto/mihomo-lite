@@ -17,7 +17,7 @@
 umask 077
 export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin${PATH:+:$PATH}"
 
-SCRIPT_VERSION="1.5.5"
+SCRIPT_VERSION="1.5.6"
 MIHOMO_DIR="/etc/mihomo-lite"
 MIHOMO_BIN="/usr/local/bin/mihomo"
 CLOUDFLARED_BIN="/usr/local/bin/cloudflared"
@@ -874,9 +874,10 @@ EOF
 
 # 直跑模式 / systemd 辅助启动脚本（固定隧道与临时隧道共用）
 # 协议来源优先级: 环境变量 ARGO_PROTOCOL > metadata 里 .argo.protocol(添加时选的) > 默认 "http2 quic" 回退
+# 连接 CF 边缘的 IP 版本: metadata 里 .argo.edge_ip (4 / 6 / auto)，auto 时不加参数由 cloudflared 自选
 _write_argo_runner() {
   local mode="$1" token="$2" port="$3"
-  local proto_meta proto_list
+  local proto_meta proto_list edge edge_flag=""
   proto_meta=$(jq -r '.argo.protocol // ""' "$METADATA_FILE" 2>/dev/null)
   if [ -n "${ARGO_PROTOCOL:-}" ]; then
     proto_list="$ARGO_PROTOCOL"
@@ -885,18 +886,25 @@ _write_argo_runner() {
   else
     proto_list="http2 quic"
   fi
+  edge=$(jq -r '.argo.edge_ip // "auto"' "$METADATA_FILE" 2>/dev/null)
+  [ -n "${ARGO_EDGE_IP:-}" ] && edge="$ARGO_EDGE_IP"
+  case "$edge" in
+    4|6) edge_flag=" --edge-ip-version ${edge}" ;;
+    *)   edge_flag="" ;;
+  esac
   local cfbin
   cfbin=$(_cloudflared_bin) || { _error "cloudflared 未安装。"; return 1; }
   {
     echo "#!/bin/bash"
     echo "exec > >(tee -a '${ARGO_LOG}') 2>&1"
     echo "PROTO_LIST='${proto_list}'"
+    echo "EDGE_FLAG='${edge_flag}'"
     echo "for p in \$PROTO_LIST; do"
-    echo "  echo \"[argo] 启动 cloudflared, 协议: \$p\""
+    echo "  echo \"[argo] 启动 cloudflared, 协议: \$p, 边缘 IP: ${edge}\""
     if [ "$mode" = "token" ]; then
-      echo "  ${cfbin} tunnel --no-autoupdate --protocol \"\$p\" --token '${token}' &"
+      echo "  ${cfbin} tunnel --no-autoupdate --protocol \"\$p\"\$EDGE_FLAG --token '${token}' &"
     else
-      echo "  ${cfbin} tunnel --no-autoupdate --protocol \"\$p\" --url http://127.0.0.1:${port} &"
+      echo "  ${cfbin} tunnel --no-autoupdate --protocol \"\$p\"\$EDGE_FLAG --url http://127.0.0.1:${port} &"
     fi
     echo "  pid=\$!"
     echo "  sleep 20"
@@ -1263,12 +1271,26 @@ _modify_node_menu() {
   local count
   count=$(jq '.nodes | length' "$METADATA_FILE" 2>/dev/null || echo 0)
   [ "$count" = "0" ] && { _warn "暂无节点。"; return; }
+  # Argo 节点(vless-ws/vmess-ws)与隧道绑定, 端口/域名/回源都由隧道决定,
+  # 不在这里改, 也不生成条目 —— 统一走【Argo 管理 → 3 修改】
+  local map
+  map=$(jq -r '.nodes | to_entries
+        | map(select(.value.proto != "vless-ws" and .value.proto != "vmess-ws"))
+        | to_entries[]
+        | "\(.key+1)\t\(.value.key)\t[\(.value.value.proto)] \(.value.value.name)\t\(.value.value.port)"' "$METADATA_FILE")
+  if [ -z "$map" ]; then
+    _warn "没有可修改的节点。Argo 节点请在【Argo 管理 → 3 修改】里调整。"
+    return
+  fi
   echo "当前节点:"
-  jq -r '.nodes | to_entries[] | "  \(.key+1)) [\(.value.proto)] \(.value.name)  端口:\(.value.port)"' "$METADATA_FILE"
-  read -rp "输入要修改的编号 (0 取消): " i
+  printf '%s\n' "$map" | awk -F'\t' '{printf "  %s) %s  端口:%s\n", $1, $3, $4}'
+  echo "  (Argo 节点不在此列表，改端口/域名请走【Argo 管理 → 3 修改】)"
+  read -rp "输入要修改的编号 (0 取消): " i || return
   [[ "$i" =~ ^[0-9]+$ ]] || return
   [ "$i" = "0" ] && return
-  local idx=$((i-1))
+  local idx
+  idx=$(printf '%s\n' "$map" | awk -F'\t' -v n="$i" '$1 == n {print $2; exit}')
+  [ -z "$idx" ] && { _error "编号无效。"; return; }
   local proto tag name port
   proto=$(jq -r --argjson i "$idx" '.nodes[$i].proto // empty' "$METADATA_FILE")
   [ -z "$proto" ] && { _error "编号无效。"; return; }
@@ -1614,6 +1636,94 @@ _probe_temp_domain() {
   fi
 }
 
+# ---------------- Argo 配置修改 ----------------
+# 可改: 回源监听端口(WS 端口, 隧道指向同步)、隧道域名、连接 CF 边缘的 IP 版本(4/6/auto)
+# Argo 节点与隧道是一体的, 所以这部分从【节点修改】里移出来单独放这里
+_modify_argo_menu() {
+  if [ "$(jq -r '.argo.enabled // false' "$METADATA_FILE")" != "true" ]; then
+    _warn "尚未配置 Argo 隧道，请先在【Argo 管理 → 1 添加】里创建。"
+    return 1
+  fi
+  local mode token domain port edge new_port new_domain new_edge v
+  mode=$(jq -r '.argo.mode // "temp"' "$METADATA_FILE")
+  token=$(jq -r '.argo.token // ""' "$METADATA_FILE")
+  domain=$(jq -r '.argo.domain // ""' "$METADATA_FILE")
+  port=$(jq -r '.argo.port // 8888' "$METADATA_FILE")
+  edge=$(jq -r '.argo.edge_ip // "auto"' "$METADATA_FILE")
+
+  echo "当前 Argo 配置:"
+  echo "  模式: ${mode}   回源端口: ${port}"
+  echo "  域名: ${domain:-未设置(临时隧道启动后自动探测)}"
+  echo "  连接 CF 边缘: ${edge}  (4=仅IPv4  6=仅IPv6  auto=cloudflared 自选)"
+  echo ""
+
+  # 1) 回源监听端口
+  new_port="$port"
+  read -rp "回源监听端口 (WS, 仅 127.0.0.1) [${port}]: " v || v=""
+  v=$(printf '%s' "${v%$'\r'}" | tr -d '[:space:]')
+  if [ -n "$v" ] && [ "$v" != "$port" ]; then
+    [[ "$v" =~ ^[0-9]+$ ]] || { _error "端口 ${v} 无效 (1-65535)。"; return 1; }
+    # _check_port_conflict 约定: 返回 0=冲突(自带报错), 返回 1=可用
+    if _check_port_conflict "$v"; then return 1; fi
+    new_port="$v"
+  fi
+
+  # 2) 隧道域名(固定隧道填 Public Hostname; 临时隧道留空, 启动后自动探测)
+  new_domain="$domain"
+  read -rp "隧道域名 [${domain:-空}]: " v || v=""
+  v=$(_normalize_name "$v")
+  [ -n "$v" ] && new_domain="$v"
+
+  # 3) 连接 CF 边缘的 IP 版本
+  new_edge="$edge"
+  echo "连接 CF 边缘的 IP 版本: 1) 仅 IPv4  2) 仅 IPv6  3) auto (cloudflared 自选)"
+  read -rp "选择 [当前 ${edge}]: " v || v=""
+  v=$(printf '%s' "${v%$'\r'}" | tr -d '[:space:]' | tr 'a-z' 'A-Z')
+  case "$v" in
+    1|4|V4|IPV4) new_edge="4" ;;
+    2|6|V6|IPV6) new_edge="6" ;;
+    3|AUTO)      new_edge="auto" ;;
+    "")          new_edge="$edge" ;;
+    *)           _warn "输入 '${v}' 无法识别，保留 ${edge}。"; new_edge="$edge" ;;
+  esac
+
+  # 写回: argo 状态 + WS 节点(端口/tag), tag 形如 argo-端口, 端口变了要同步
+  local tmp="${METADATA_FILE}.tmp"
+  if jq --argjson port "$new_port" --arg edge "$new_edge" \
+        --arg oldtag "argo-${port}" --arg newtag "argo-${new_port}" \
+        '.argo.port = $port | .argo.edge_ip = $edge
+         | .nodes |= map(
+             if (.proto == "vless-ws" or .proto == "vmess-ws")
+             then .port = $port | .tag = (if .tag == $oldtag then $newtag else .tag end)
+             else . end)' "$METADATA_FILE" > "$tmp" && [ -s "$tmp" ]; then
+    mv "$tmp" "$METADATA_FILE"
+  else
+    rm -f "$tmp"
+    _error "写入失败，未做任何更改。"
+    return 1
+  fi
+  # 域名单独写, 空输入保留原值(临时隧道靠探测回填, 不能清空)
+  if [ -n "$new_domain" ] && [ "$new_domain" != "$domain" ]; then
+    tmp="${METADATA_FILE}.tmp"
+    jq --arg d "$new_domain" '.argo.domain = $d
+       | .nodes |= map(if (.proto == "vless-ws" or .proto == "vmess-ws") then .argo_domain = $d else . end)' \
+       "$METADATA_FILE" > "$tmp" && mv "$tmp" "$METADATA_FILE"
+  fi
+
+  _write_argo_runner "$mode" "$token" "$new_port"
+  _regen_config
+  [ "$mode" = "temp" ] && : > "$ARGO_LOG"
+  _restart_all
+  if [ "$mode" = "temp" ]; then
+    _info "临时隧道端口变更后域名会重新分配，等待探测..."
+    _probe_temp_domain
+  elif [ "$new_port" != "$port" ]; then
+    _warn "固定隧道需在 CF 面板把 Public Hostname 的 URL 改成 127.0.0.1:${new_port}，否则回源失败。"
+  fi
+  _show_links
+  _success "Argo 配置已更新 (端口 ${new_port} / 边缘 IP ${new_edge} / 域名 ${new_domain:-待探测})。"
+}
+
 # 重新获取临时隧道（域名会变，链接随之更新）
 _renew_temp_argo() {
   if [ "$(jq -r '.argo.mode // ""' "$METADATA_FILE")" != "temp" ]; then
@@ -1780,11 +1890,13 @@ _main_menu() {
       2)
         echo " 1) 添加 Argo 节点"
         echo " 2) 删除 Argo 节点 / Argo 隧道"
+        echo " 3) 修改 Argo 配置 (回源端口 / 隧道域名 / 连接 CF 的 IP 版本)"
         echo " 0) 返回"
         read -rp "Argo 管理: " a || break
         case "$a" in
           1) _add_argo_node ;;
           2) _delete_argo_menu ;;
+          3) _modify_argo_menu ;;
           0) ;;
           *) _error "无效输入。" ;;
         esac

@@ -10,14 +10,14 @@
 #   5. Mieru
 #   6. Shadowsocks 2022
 #   7. Trojan + Reality
-#   8. VLESS/VMess + WS + Argo 隧道（cloudflared 默认 http2/TCP，启动失败自动改用 QUIC）
+#   8. VLESS/VMess + WS + Argo 隧道（添加时选 cloudflared 协议: http2/TCP 或 quic/UDP）
 # 支持: Debian/Ubuntu(systemd) / Alpine(OpenRC) / 无 init 直跑模式
 # 需 root 权限运行
 #=============================================================================
 umask 077
 export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin${PATH:+:$PATH}"
 
-SCRIPT_VERSION="1.5.4"
+SCRIPT_VERSION="1.5.5"
 MIHOMO_DIR="/etc/mihomo-lite"
 MIHOMO_BIN="/usr/local/bin/mihomo"
 CLOUDFLARED_BIN="/usr/local/bin/cloudflared"
@@ -152,6 +152,28 @@ _ask_ip_ver() {
     IP_VER="v4"
   fi
   _info "对外 IP 版本: ${IP_VER}"
+}
+
+# Argo 传输协议选择: 结果存 ARGO_PROTO_RESULT (http2|quic)
+# Argo 节点对外只走 Cloudflare 域名, 与"本机对外 IP 版本"无关, 所以这里问协议而不是 IP
+_ask_argo_protocol() {
+  local cur t
+  cur="${ARGO_PROTOCOL:-}"
+  [ -z "$cur" ] && cur=$(jq -r '.argo.protocol // ""' "$METADATA_FILE" 2>/dev/null)
+  [ "$cur" = "quic" ] || cur="http2"
+  echo "Argo 传输协议: 1) http2 (TCP, 默认最稳)  2) quic (UDP, 家宽/弱网常更顺)"
+  read -rp "选择 [当前 ${cur}]: " t || t=""
+  t=$(printf '%s' "${t%$'\r'}" | tr -d '[:space:]' | tr 'a-z' 'A-Z')
+  case "$t" in
+    1|HTTP2|H2) ARGO_PROTO_RESULT="http2" ;;
+    2|QUIC)     ARGO_PROTO_RESULT="quic" ;;
+    "")         ARGO_PROTO_RESULT="$cur" ;;
+    *)          _warn "输入 '${t}' 无法识别，保留 ${cur}。"; ARGO_PROTO_RESULT="$cur" ;;
+  esac
+  _info "Argo 传输协议: ${ARGO_PROTO_RESULT} (启动失败不再自动回退，需切换请重新添加)"
+  if [ -n "${ARGO_PROTOCOL:-}" ] && [ "$ARGO_PROTO_RESULT" != "$ARGO_PROTOCOL" ]; then
+    _warn "环境变量 ARGO_PROTOCOL=${ARGO_PROTOCOL} 优先级更高，实际启动仍按该值。"
+  fi
 }
 
 _detect_init_system() {
@@ -545,10 +567,16 @@ _build_links() {
     local tag proto port link=""
     tag=$(jq -r '.name // .tag' <<<"$n"); proto=$(jq -r '.proto' <<<"$n"); port=$(jq -r '.port' <<<"$n")
     local enc_name
-    local ipv host
-    ipv=$(jq -r '.ip_ver // "v4"' <<<"$n")
-    ip=$(_resolve_node_ip "$ipv")
-    if [[ "$ip" == *:* ]]; then host="[$ip]"; else host="$ip"; fi
+    local ipv host="" ip=""
+    case "$proto" in
+      # Argo 节点对外走 Cloudflare 域名, 不解析本机 IP(省掉无谓的 IPv6 探测与告警)
+      vless-ws|vmess-ws) ;;
+      *)
+        ipv=$(jq -r '.ip_ver // "v4"' <<<"$n")
+        ip=$(_resolve_node_ip "$ipv")
+        if [[ "$ip" == *:* ]]; then host="[$ip]"; else host="$ip"; fi
+        ;;
+    esac
     # 链接 fragment 必须是 percent-encoded 原文; 用 base64 客户端会把节点名显示成乱码
     enc_name=$(_url_encode "$tag")
     case "$proto" in
@@ -845,11 +873,18 @@ EOF
 }
 
 # 直跑模式 / systemd 辅助启动脚本（固定隧道与临时隧道共用）
-# 协议选择：默认先用 http2(TCP)，启动后 20 秒内退出则自动改用 quic 重试。
-# 也可用环境变量 ARGO_PROTOCOL 指定单一协议（http2 / quic / auto），此时不做回退。
+# 协议来源优先级: 环境变量 ARGO_PROTOCOL > metadata 里 .argo.protocol(添加时选的) > 默认 "http2 quic" 回退
 _write_argo_runner() {
   local mode="$1" token="$2" port="$3"
-  local proto_list="${ARGO_PROTOCOL:-http2 quic}"
+  local proto_meta proto_list
+  proto_meta=$(jq -r '.argo.protocol // ""' "$METADATA_FILE" 2>/dev/null)
+  if [ -n "${ARGO_PROTOCOL:-}" ]; then
+    proto_list="$ARGO_PROTOCOL"
+  elif [ -n "$proto_meta" ]; then
+    proto_list="$proto_meta"
+  else
+    proto_list="http2 quic"
+  fi
   local cfbin
   cfbin=$(_cloudflared_bin) || { _error "cloudflared 未安装。"; return 1; }
   {
@@ -1177,7 +1212,9 @@ _add_trojan_reality() {
 }
 
 # ---------------- Argo 隧道节点 ----------------
-# 说明：cloudflared 默认 --protocol http2(TCP, 最稳)，若启动失败自动改用 --protocol quic 重试
+# 说明：添加时询问 cloudflared 传输协议 (1) http2/TCP 最稳  2) quic/UDP)，
+# 选择结果写入 metadata.argo.protocol，run-argo.sh 按该值启动，不再自动回退。
+# 环境变量 ARGO_PROTOCOL 仍可强制覆盖。
 
 # 创建本机 WS 监听节点（Argo 回源用），供新隧道与复用已有隧道两条路径共用
 _create_argo_ws_listener() {
@@ -1189,7 +1226,8 @@ _create_argo_ws_listener() {
   local port="$ASK_PORT_RESULT" uuid path
   uuid=$(_gen_uuid)
   path="/$(_gen_hex 8)"
-  _ask_ip_ver
+  # 复用外部 cloudflared 时协议由用户自己的隧道配置决定, 这里不问; WS 监听只在 127.0.0.1
+  IP_VER="v4"
   _ask_node_name "Argo-${proto}" "$port"
   local node
   node=$(jq -cn --arg tag "argo-${port}" --arg name "$NODE_NAME" --arg port "$port" --arg ipver "$IP_VER" \
@@ -1520,7 +1558,9 @@ _add_argo_node() {
   path="/$(_gen_hex 8)"
   echo "1) 临时隧道 (trycloudflare.com, 域名随机)  2) 固定隧道 (Cloudflare Tunnel Token)"
   read -rp "选择隧道模式 [1]: " m
-  _ask_ip_ver
+  # Argo 节点对外只走 Cloudflare 域名, 与本机对外 IP 版本无关; 这里问的是 cloudflared 的传输协议
+  _ask_argo_protocol
+  IP_VER="v4"
   _ask_node_name "Argo-${proto}" "$port"
   if [[ "$m" = "2" ]]; then
     read -rp "粘贴 Cloudflare Tunnel Token: " token
@@ -1544,8 +1584,8 @@ _add_argo_node() {
   _add_node_meta "$node"
   # 更新 argo 状态
   local tmp="${METADATA_FILE}.tmp"
-  jq --arg mode "$mode" --arg token "$token" --arg domain "$domain" --argjson port "$port" \
-    '.argo = {enabled:true, mode:$mode, token:$token, domain:$domain, port:$port}' "$METADATA_FILE" > "$tmp" && mv "$tmp" "$METADATA_FILE"
+  jq --arg mode "$mode" --arg token "$token" --arg domain "$domain" --argjson port "$port" --arg protocol "$ARGO_PROTO_RESULT" \
+    '.argo = {enabled:true, mode:$mode, token:$token, domain:$domain, port:$port, protocol:$protocol}' "$METADATA_FILE" > "$tmp" && mv "$tmp" "$METADATA_FILE"
   _write_argo_runner "$mode" "$token" "$port"
   _create_services
   _regen_config; _restart_all

@@ -1,6 +1,6 @@
 # mihomo-lite
 
-> 版本：v1.5.4
+> 版本：v1.5.5
 >
 > **⚠️ 测试阶段（BETA）**：本项目当前处于测试阶段，功能与配置格式可能随时调整，请勿在生产环境使用。
 
@@ -41,7 +41,7 @@ mihomo 内核多协议服务端一键管理脚本，交互风格参考 [singbox-
 - 节点默认命名「国家-运营商-协议-端口」，可自定义覆盖；重名自动追加 `-2/-3`（客户端 proxies 不允许同名）
 - 修改节点时 Mieru 可在 **TCP / UDP** 之间在线切换，改完自动重建配置并重启
 - 对外端口默认随机空闲端口（避免撞车），Argo 回源端口固定 8888（仅监听 127.0.0.1）
-- 节点可选对外 **IPv4 / IPv6**：双栈机器添加时选择、单栈机器自动采用，纯 IPv6 机器自动以 `::` 监听
+- 节点可选对外 **IPv4 / IPv6**：双栈机器添加时选择、单栈机器自动采用，纯 IPv6 机器自动以 `::` 监听（Argo 节点例外：对外走 Cloudflare 域名，添加时问的是 cloudflared 传输协议）
 - 按 CPU 能力选择内核（x86-64-v3 优化版 / compatible 兼容版），老 CPU 可正常运行
 - 复用本机已有 cloudflared，不覆盖、不破坏原有 Cloudflare 部署
 - 分享链接输出（`/etc/mihomo-lite/sub/links.txt`）+ Clash/Mihomo 客户端配置（`sub/clash.yaml`）
@@ -67,15 +67,23 @@ SNI_DEFAULT=aws.amazon.com bash mihomo-lite.sh
 
 ## Argo 隧道
 
-cloudflared 默认使用 `--protocol http2`（TCP，最稳）；**若隧道启动失败，脚本会自动改用 `--protocol quic` 重试**（启动后 20 秒内退出即判定失败，依次尝试 http2 → quic）。
+添加 Argo 节点时会问 cloudflared 的传输协议（不再问本机对外 IP 版本——Argo 对外只走 Cloudflare 域名，问 IP 没有意义）：
 
-需要固定单一协议时可指定环境变量（不再自动回退）：
+```
+Argo 传输协议: 1) http2 (TCP, 默认最稳)  2) quic (UDP, 家宽/弱网常更顺)
+选择 [当前 http2]:
+```
+
+选择结果写入 `metadata.json` 的 `argo.protocol`，`run-argo.sh` 按该值启动，**不做自动回退**；菜单重启、脚本更新后沿用同一协议。想换协议重新走一次 Argo 添加即可（临时隧道会换域名，固定隧道不变）。
+
+环境变量仍可覆盖默认值（影响的是"当前默认值"，交互里手动选仍然优先）：
 
 ```bash
-ARGO_PROTOCOL=quic bash mihomo-lite.sh     # 强制 QUIC
-ARGO_PROTOCOL=http2 bash mihomo-lite.sh    # 强制 http2
-ARGO_PROTOCOL=auto bash mihomo-lite.sh     # 交给 cloudflared 自选
+ARGO_PROTOCOL=quic bash mihomo-lite.sh     # 默认 QUIC
+ARGO_PROTOCOL=http2 bash mihomo-lite.sh    # 默认 http2
 ```
+
+老配置（`metadata.json` 里没有 `argo.protocol` 字段）保持原行为：先 http2，20 秒内退出自动换 quic 重试。
 
 ## 关于订阅
 

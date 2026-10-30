@@ -17,7 +17,7 @@
 umask 077
 export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin${PATH:+:$PATH}"
 
-SCRIPT_VERSION="1.5.8"
+SCRIPT_VERSION="1.5.9"
 MIHOMO_DIR="/etc/mihomo-lite"
 MIHOMO_BIN="/usr/local/bin/mihomo"
 CLOUDFLARED_BIN="/usr/local/bin/cloudflared"
@@ -556,7 +556,8 @@ EOF
 _build_links() {
   local ip; ip=$(_get_public_ip)
   local links_file="${SUB_DIR}/links.txt" yaml_file="${SUB_DIR}/clash.yaml"
-  : > "$links_file"
+  local argo_file="${SUB_DIR}/argo.txt"
+  : > "$links_file"; : > "$argo_file"
   {
     echo "# mihomo-lite 客户端配置（Clash/Mihomo 格式）自动生成"
     echo "# 若节点使用 IPv6 地址，客户端顶层需要 ipv6: true 才能连通"
@@ -618,6 +619,8 @@ _build_links() {
         local uuid path domain ws_proto
         uuid=$(jq -r '.uuid' <<<"$n"); path=$(jq -r '.ws_path' <<<"$n")
         domain=$(jq -r '.argo_domain // ""' <<<"$n")
+        # 兼容旧数据/固定隧道首次添加: 节点上没写 argo_domain 时回退到隧道全局域名
+        [ -z "$domain" ] && domain=$(jq -r '.argo.domain // ""' "$METADATA_FILE" 2>/dev/null)
         [ -z "$domain" ] && continue
         if [ "$proto" = "vless-ws" ]; then
           link="vless://${uuid}@${domain}:443?encryption=none&security=tls&type=ws&host=${domain}&path=$(_url_encode "$path")#arg-${enc_name}"
@@ -676,6 +679,10 @@ _build_links() {
         ;;
     esac
     [ -n "$link" ] && echo "$link" >> "$links_file"
+    # Argo 节点单独存一份, 方便在【Argo 管理 → 4】里只看到隧道节点的链接
+    case "$proto" in
+      vless-ws|vmess-ws) [ -n "$link" ] && echo "$link" >> "$argo_file" ;;
+    esac
   done
   chmod 600 "$links_file" "$yaml_file" 2>/dev/null
 }
@@ -698,6 +705,17 @@ _show_links() {
   local has_mieru
   has_mieru=$(jq '[.nodes[]? | select(.proto == "mieru")] | length' "$METADATA_FILE" 2>/dev/null)
   [ "${has_mieru:-0}" -gt 0 ] 2>/dev/null && _warn "Mieru 节点无通用分享链接，请直接使用 clash.yaml 中的配置。"
+  # Argo 节点没有隧道域名时不会生成链接, 明确说清原因, 否则看起来像"节点根本不存在"
+  local ws_count ws_domain
+  ws_count=$(jq '[.nodes[]? | select(.proto == "vless-ws" or .proto == "vmess-ws")] | length' "$METADATA_FILE" 2>/dev/null)
+  if [ "${ws_count:-0}" -gt 0 ] 2>/dev/null; then
+    ws_domain=$(jq -r '.argo.domain // ""' "$METADATA_FILE" 2>/dev/null)
+    if [ -z "$ws_domain" ]; then
+      _warn "Argo 节点因缺少隧道域名未生成链接，请到【2 Argo 管理 → 4】查看并补域名。"
+    else
+      _info "Argo 节点链接单独存放在 ${SUB_DIR}/argo.txt，也可在【2 Argo 管理 → 4】查看。"
+    fi
+  fi
 }
 
 # ---------------- 核心安装 ----------------
@@ -1601,8 +1619,8 @@ _add_argo_node() {
   jq -r '.nodes[]? | select(.proto == "vless-ws" or .proto == "vmess-ws") | .tag' "$METADATA_FILE" | while read -r t; do _del_node_meta "$t"; done
   local node
   node=$(jq -cn --arg tag "argo-${port}" --arg name "$NODE_NAME" --arg port "$port" \
-    --arg proto "$proto" --arg uuid "$uuid" --arg path "$path" --arg ipver "$IP_VER" \
-    '{tag:$tag,name:$name,ip_ver:$ipver,proto:$proto,port:($port|tonumber),uuid:$uuid,ws_path:$path}')
+    --arg proto "$proto" --arg uuid "$uuid" --arg path "$path" --arg ipver "$IP_VER" --arg domain "$domain" \
+    '{tag:$tag,name:$name,ip_ver:$ipver,proto:$proto,port:($port|tonumber),uuid:$uuid,ws_path:$path,argo_domain:(if $domain == "" then null else $domain end)}')
   _add_node_meta "$node"
   # 更新 argo 状态
   local tmp="${METADATA_FILE}.tmp"
@@ -1722,6 +1740,47 @@ _modify_argo_menu() {
   fi
   _show_links
   _success "Argo 配置已更新 (端口 ${new_port} / 边缘 IP ${new_edge} / 域名 ${new_domain:-待探测})。"
+}
+
+# 查看 Argo 隧道与节点(Argo 节点与隧道绑定, 不单独出现在节点修改里, 统一在这里看)
+_show_argo_overview() {
+  if [ "$(jq -r '.argo.enabled // false' "$METADATA_FILE")" != "true" ]; then
+    _warn "尚未配置 Argo 隧道，请先在【Argo 管理 → 1 添加】里创建。"
+    return 1
+  fi
+  local mode port domain proto edge ws_count
+  mode=$(jq -r '.argo.mode // "temp"' "$METADATA_FILE")
+  port=$(jq -r '.argo.port // 8888' "$METADATA_FILE")
+  domain=$(jq -r '.argo.domain // ""' "$METADATA_FILE")
+  proto=$(jq -r '.argo.protocol // "http2→quic 回退"' "$METADATA_FILE")
+  edge=$(jq -r '.argo.edge_ip // "auto"' "$METADATA_FILE")
+  ws_count=$(jq -r '[.nodes[]? | select(.proto == "vless-ws" or .proto == "vmess-ws")] | length' "$METADATA_FILE")
+
+  echo ""
+  echo -e "${CYAN}================ Argo 隧道 ================${NC}"
+  echo "  模式: ${mode}   回源端口: ${port}"
+  echo "  域名: ${domain:-未设置(临时隧道启动后自动探测)}"
+  echo "  传输协议: ${proto}   边缘 IP: ${edge}"
+  if _service_active "$ARGO_SERVICE_NAME"; then
+    _success "cloudflared 运行中"
+  else
+    _warn "cloudflared 未运行 (菜单 6 重启 / 菜单 9 看日志)"
+  fi
+  echo "  WS 节点数: ${ws_count}"
+  echo ""
+  echo "  节点:"
+  jq -r '.nodes[]? | select(.proto == "vless-ws" or .proto == "vmess-ws")
+         | "   - [\(.proto)] \(.name)  回源 127.0.0.1:\(.port)  域名:\(.argo_domain // "未绑定")"' "$METADATA_FILE"
+  echo ""
+  echo -e "${CYAN}================ Argo 节点链接 ================${NC}"
+  _build_links
+  if [ -s "${SUB_DIR}/argo.txt" ]; then
+    cat "${SUB_DIR}/argo.txt"
+  else
+    _warn "暂无 Argo 链接：节点缺少隧道域名。固定隧道在【2→3 修改】里填域名，临时隧道重启后等探测。"
+  fi
+  echo -e "${CYAN}=============================================${NC}"
+  echo "文件: ${SUB_DIR}/argo.txt"
 }
 
 # 重新获取临时隧道（域名会变，链接随之更新）
@@ -1909,12 +1968,14 @@ _main_menu() {
         echo " 1) 添加 Argo 节点"
         echo " 2) 删除 Argo 节点 / Argo 隧道"
         echo " 3) 修改 Argo 配置 (回源端口 / 隧道域名 / 连接 CF 的 IP 版本)"
+        echo " 4) 查看 Argo 隧道与节点链接"
         echo " 0) 返回"
         read -rp "Argo 管理: " a || break
         case "$a" in
           1) _add_argo_node ;;
           2) _delete_argo_menu ;;
           3) _modify_argo_menu ;;
+          4) _show_argo_overview ;;
           0) ;;
           *) _error "无效输入。" ;;
         esac

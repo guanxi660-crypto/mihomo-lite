@@ -1,6 +1,6 @@
 # mihomo-lite
 
-> 版本：v1.5.8
+> 版本：v1.5.9
 >
 > **⚠️ 测试阶段（BETA）**：本项目当前处于测试阶段，功能与配置格式可能随时调整，请勿在生产环境使用。
 
@@ -44,7 +44,7 @@ mihomo 内核多协议服务端一键管理脚本，交互风格参考 [singbox-
 - 节点可选对外 **IPv4 / IPv6**：双栈机器添加时选择、单栈机器自动采用，纯 IPv6 机器自动以 `::` 监听（Argo 节点例外：对外走 Cloudflare 域名，添加时问的是 cloudflared 传输协议）
 - 按 CPU 能力选择内核（x86-64-v3 优化版 / compatible 兼容版），老 CPU 可正常运行
 - 复用本机已有 cloudflared，不覆盖、不破坏原有 Cloudflare 部署
-- 分享链接输出（`/etc/mihomo-lite/sub/links.txt`）+ Clash/Mihomo 客户端配置（`sub/clash.yaml`）
+- 分享链接输出（`/etc/mihomo-lite/sub/links.txt`，Argo 节点另存 `sub/argo.txt`）+ Clash/Mihomo 客户端配置（`sub/clash.yaml`）
 - 支持 systemd / OpenRC / 无 init 直跑三种模式
 - 重启前 `mihomo -t` 配置校验 + 启动后存活兜底检查
 - SS2022 严格长度密钥校验（避免运行期 `decode psk` 错误）
@@ -96,6 +96,16 @@ Argo 节点和隧道是一体的，所以端口/域名这类字段**不在「节
 | 连接 CF 边缘的 IP 版本 | `1) 仅 IPv4` / `2) 仅 IPv6` / `3) auto`，落到 `cloudflared --edge-ip-version`；写入 `argo.edge_ip`，重启沿用。这台机器 IPv6 到 CF 不通、或想固定走 v4 时用这个 |
 
 改完自动重写 `run-argo.sh`、重建配置并重启；临时隧道会等新域名探测出来再刷新链接。
+
+### 查看 Argo 隧道（Argo 管理 → 4）
+
+Argo 节点不在「节点修改」列表里，也常常在「查看节点链接」里被忽略——所以单独给了一个入口：
+
+- 隧道信息：模式 / 回源端口 / 域名 / 传输协议 / 边缘 IP / cloudflared 运行状态
+- 节点列表：每个 WS 节点的协议、回源地址、绑定的域名
+- Argo 节点链接：同时落盘到 `sub/argo.txt`（`links.txt` 里也保留全量）
+
+固定隧道添加时会把 Public Hostname 写进节点的 `argo_domain`；旧数据缺这个字段时，链接生成会自动回退用隧道全局域名，不会再出现「节点在、链接不在」。
 
 ## 关于订阅
 

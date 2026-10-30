@@ -17,7 +17,7 @@
 umask 077
 export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin${PATH:+:$PATH}"
 
-SCRIPT_VERSION="1.5.3"
+SCRIPT_VERSION="1.5.4"
 MIHOMO_DIR="/etc/mihomo-lite"
 MIHOMO_BIN="/usr/local/bin/mihomo"
 CLOUDFLARED_BIN="/usr/local/bin/cloudflared"
@@ -31,7 +31,8 @@ SERVICE_NAME="mihomo-lite"
 ARGO_SERVICE_NAME="mihomo-argo"
 GITHUB_RAW_URL="https://raw.githubusercontent.com/guanxi660-crypto/mihomo-lite/main/mihomo-lite.sh"
 SELF_SCRIPT_PATH="$(readlink -f "$0" 2>/dev/null || echo "$0")"
-DEFAULT_SNI_LIST="www.amd.com www.cloudflare.com www.amazon.com www.microsoft.com"
+# SNI 随机池(默认四选一); 想锁定单一值用环境变量 SNI_DEFAULT=xxx mh
+DEFAULT_SNI_LIST="aws.amazon.com www.amd.com www.amazon.com www.microsoft.com"
 
 # ---------------- 基础输出 ----------------
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[0;33m'; CYAN='\033[0;36m'; NC='\033[0m'
@@ -163,34 +164,93 @@ _detect_init_system() {
   fi
 }
 
-# 默认节点名: 国家-运营商-协议 (ip-api.com 免费接口, 中文运营商名, 失败退化为 XX-ISP)
+# 默认节点名: 国家-运营商-协议 (ip-api.com 单次请求取两个字段, 结果缓存 24h, 失败退化为 XX-ISP)
 _geo_node_name() {
-  local proto_label="$1" cc isp
-  cc=$(timeout 5 curl -fsS "http://ip-api.com/line/?fields=countryCode" 2>/dev/null | tr -d '\n\r ')
-  isp=$(timeout 5 curl -fsS "http://ip-api.com/line/?fields=isp&lang=zh" 2>/dev/null | head -n1 | tr -d '\r')
+  local proto_label="$1" cc="" isp="" ts now raw cut i
+  now=$(date +%s)
+  # 命中缓存就不打接口(免费额度 45 次/分钟, 双栈机器每次添加要问两轮)
+  if [ -s "$METADATA_FILE" ]; then
+    ts=$(jq -r '.geo.ts // 0' "$METADATA_FILE" 2>/dev/null)
+    if [ -n "$ts" ] && [ "$ts" -gt 0 ] 2>/dev/null && [ $((now - ts)) -lt 86400 ]; then
+      cc=$(jq -r '.geo.cc // ""' "$METADATA_FILE" 2>/dev/null)
+      isp=$(jq -r '.geo.isp // ""' "$METADATA_FILE" 2>/dev/null)
+    fi
+  fi
+  if [ -z "$cc" ] || [ -z "$isp" ]; then
+    cc=""; isp=""
+    # 一次请求拿两行: 第一行 countryCode, 第二行 isp; 失败重试一次
+    for i in 1 2; do
+      raw=$(timeout 6 curl -fsS "http://ip-api.com/line/?fields=countryCode,isp&lang=zh" 2>/dev/null | tr -d '\r')
+      cc=$(printf '%s\n' "$raw" | sed -n '1p' | tr -d '[:space:]')
+      isp=$(printf '%s\n' "$raw" | sed -n '2p')
+      [ -n "$cc" ] && [ -n "$isp" ] && break
+      cc=""; isp=""
+    done
+    # 取到才写缓存, 失败不落盘, 下次自动重试
+    if [ -n "$cc" ] && [ -n "$isp" ] && [ -s "$METADATA_FILE" ]; then
+      local tmp="${METADATA_FILE}.tmp"
+      if jq --arg cc "$cc" --arg isp "$isp" --argjson ts "$now" '.geo = {cc:$cc, isp:$isp, ts:$ts}' "$METADATA_FILE" > "$tmp" 2>/dev/null && [ -s "$tmp" ]; then
+        mv "$tmp" "$METADATA_FILE"
+      else
+        rm -f "$tmp"
+      fi
+    fi
+  fi
   [ -z "$cc" ] && cc="XX"
   if [ -z "$isp" ]; then
     isp="ISP"
   else
-    isp="${isp%%(*}"; isp="${isp%% *}"; isp="${isp:0:16}"
+    isp="${isp%%(*}"                                                   # 砍掉括号补充说明
+    isp=$(printf '%s' "$isp" | sed 's/^[[:space:]]*//; s/[[:space:]]*$//')
+    # 按字符(非字节)截断到 16, 避免把中文运营商名切半产生非法 UTF-8
+    cut=$(printf '%s' "$isp" | jq -Rr '.[0:16]' 2>/dev/null)
+    [ -n "$cut" ] && isp="$cut"
     [ -z "$isp" ] && isp="ISP"
   fi
   echo "${cc}-${isp}-${proto_label}"
 }
 
-# 节点命名交互: 传协议显示名, 结果存 NODE_NAME
-# 注意: 输入被吞(空行/EOF/paste 带 \r)时不能静默用默认名, 这里会去掉 \r 和首尾空白并回显最终名称
+# 名称清洗: 去 \r、首尾空白与成对包裹的引号 (添加/修改两条路径共用)
+_normalize_name() {
+  local s
+  s=$(printf '%s' "$1" | tr -d '\r')
+  s="${s#"${s%%[![:space:]]*}"}"
+  s="${s%"${s##*[![:space:]]}"}"
+  [[ ${#s} -ge 2 && "$s" == \"*\" ]] && s="${s:1:${#s}-2}"
+  [[ ${#s} -ge 2 && "$s" == \'*\' ]] && s="${s:1:${#s}-2}"
+  printf '%s' "$s"
+}
+
+# 名称去重: 与已有节点重名时追加 -2/-3...; 结果写回 NODE_NAME
+# (mihomo 客户端 proxies 不允许同名, 重复添加同协议会直接撞名)
+_unique_node_name() {
+  local base="$1" cand="$1" n=2
+  if [ -s "$METADATA_FILE" ] && command -v jq >/dev/null 2>&1; then
+    while jq -e --arg nm "$cand" 'any(.nodes[]?; .name == $nm)' "$METADATA_FILE" >/dev/null 2>&1; do
+      cand="${base}-${n}"; n=$((n+1))
+      [ "$n" -gt 99 ] && break
+    done
+  fi
+  if [ "$cand" != "$base" ]; then
+    _warn "名称 ${base} 已存在，改用 ${cand}。"
+  fi
+  NODE_NAME="$cand"
+}
+
+# 节点命名交互: 传协议显示名(+可选端口, 端口进默认名保证唯一), 结果存 NODE_NAME
+# 注意: 输入被吞(空行/EOF/paste 带 \r)时不能静默用默认名, 这里会清洗并回显最终名称
 _ask_node_name() {
   local def nm
   def=$(_geo_node_name "$1")
+  [ -n "${2:-}" ] && def="${def}-$2"
   read -rp "节点名称 [${def}]: " nm || nm=""
-  nm=${nm%$'\r'}
-  nm=$(printf '%s' "$nm" | sed 's/^[[:space:]]*//; s/[[:space:]]*$//')
-  if [ -n "$nm" ] && [ "$nm" != "$def" ]; then
+  nm=$(_normalize_name "$nm")
+  if [ -n "$nm" ]; then
     NODE_NAME="$nm"
   else
     NODE_NAME="$def"
   fi
+  _unique_node_name "$NODE_NAME"
   _info "节点名称: ${NODE_NAME}"
 }
 
@@ -206,8 +266,11 @@ _check_port_conflict() {
   return 1
 }
 
-# 随机选取一个默认 SNI
-_pick_sni() { echo "$DEFAULT_SNI_LIST" | tr ' ' '\n' | shuf -n1 2>/dev/null || echo "www.cloudflare.com"; }
+# 随机选取一个默认 SNI: 默认从池子里随机; SNI_DEFAULT 环境变量优先(锁单一值)
+_pick_sni() {
+  [ -n "${SNI_DEFAULT:-}" ] && { echo "$SNI_DEFAULT"; return; }
+  echo "$DEFAULT_SNI_LIST" | tr ' ' '\n' | sed '/^$/d' | shuf -n1 2>/dev/null || echo "aws.amazon.com"
+}
 
 # 自签证书 (用于 hy2/tuic/anytls 等需要 TLS 证书的协议)
 _gen_selfsigned_cert() {
@@ -481,12 +544,13 @@ _build_links() {
   jq -c '.nodes[]?' "$METADATA_FILE" | while IFS= read -r n; do
     local tag proto port link=""
     tag=$(jq -r '.name // .tag' <<<"$n"); proto=$(jq -r '.proto' <<<"$n"); port=$(jq -r '.port' <<<"$n")
-    local enc_tag enc_name
+    local enc_name
     local ipv host
     ipv=$(jq -r '.ip_ver // "v4"' <<<"$n")
     ip=$(_resolve_node_ip "$ipv")
     if [[ "$ip" == *:* ]]; then host="[$ip]"; else host="$ip"; fi
-    enc_tag=$(_b64_nopad "$tag")
+    # 链接 fragment 必须是 percent-encoded 原文; 用 base64 客户端会把节点名显示成乱码
+    enc_name=$(_url_encode "$tag")
     case "$proto" in
       vless-xhttp)
         local xuuid xpbk xsid xsni xpath xmode
@@ -494,7 +558,7 @@ _build_links() {
         xsid=$(jq -r '.short_id' <<<"$n"); xsni=$(jq -r '.sni' <<<"$n")
         xpath=$(jq -r '.ws_path // "/"' <<<"$n"); xmode=$(jq -r '.xhttp_mode // "auto"' <<<"$n")
         # XHTTP 与 Vision 互斥(flow 必须留空)，链接用 type=xhttp + mode 参数
-        link="vless://${xuuid}@${host}:${port}?encryption=none&security=reality&sni=${xsni}&fp=chrome&pbk=${xpbk}&sid=${xsid}&type=xhttp&path=$(_url_encode "$xpath")&mode=${xmode}#${enc_tag}"
+        link="vless://${xuuid}@${host}:${port}?encryption=none&security=reality&sni=${xsni}&fp=chrome&pbk=${xpbk}&sid=${xsid}&type=xhttp&path=$(_url_encode "$xpath")&mode=${xmode}#${enc_name}"
         printf '  - name: "%s"
     type: vless
     server: "%s"
@@ -517,7 +581,7 @@ _build_links() {
         local uuid pbk sid sni
         uuid=$(jq -r '.uuid' <<<"$n"); pbk=$(jq -r '.public_key' <<<"$n")
         sid=$(jq -r '.short_id' <<<"$n"); sni=$(jq -r '.sni' <<<"$n")
-        link="vless://${uuid}@${host}:${port}?encryption=none&flow=xtls-rprx-vision&security=reality&sni=${sni}&fp=chrome&pbk=${pbk}&sid=${sid}&type=tcp#${enc_tag}"
+        link="vless://${uuid}@${host}:${port}?encryption=none&flow=xtls-rprx-vision&security=reality&sni=${sni}&fp=chrome&pbk=${pbk}&sid=${sid}&type=tcp#${enc_name}"
         {
           printf '  - name: "%s"\n    type: vless\n    server: "%s"\n    port: %s\n    uuid: %s\n    udp: true\n    tls: true\n    flow: xtls-rprx-vision\n    servername: %s\n    client-fingerprint: chrome\n    network: tcp\n    reality-opts:\n      public-key: %s\n      short-id: "%s"\n' "$tag" "$ip" "$port" "$uuid" "$sni" "$pbk" "$sid"
         } >> "$yaml_file"
@@ -528,7 +592,7 @@ _build_links() {
         domain=$(jq -r '.argo_domain // ""' <<<"$n")
         [ -z "$domain" ] && continue
         if [ "$proto" = "vless-ws" ]; then
-          link="vless://${uuid}@${domain}:443?encryption=none&security=tls&type=ws&host=${domain}&path=$(_url_encode "$path")#arg-${enc_tag}"
+          link="vless://${uuid}@${domain}:443?encryption=none&security=tls&type=ws&host=${domain}&path=$(_url_encode "$path")#arg-${enc_name}"
           printf '  - name: "%s"\n    type: vless\n    server: "%s"\n    port: 443\n    uuid: %s\n    udp: true\n    tls: true\n    servername: %s\n    network: ws\n    ws-opts:\n      path: "%s"\n      headers:\n        Host: %s\n' "$tag" "$domain" "$uuid" "$domain" "$path" "$domain" >> "$yaml_file"
         else
           local vj
@@ -543,7 +607,7 @@ _build_links() {
         obfs=$(jq -r '.obfs // ""' <<<"$n"); obfp=$(jq -r '.obfs_password // ""' <<<"$n")
         link="hy2://${pass}@${host}:${port}?sni=${sni}&insecure=1"
         [ -n "$obfs" ] && link="${link}&obfs=salamander&obfs-password=${obfp}"
-        link="${link}#${enc_tag}"
+        link="${link}#${enc_name}"
         {
           printf '  - name: "%s"\n    type: hysteria2\n    server: "%s"\n    port: %s\n    password: %s\n    sni: %s\n    skip-cert-verify: true\n' "$tag" "$ip" "$port" "$pass" "$sni"
           [ -n "$obfs" ] && printf '    obfs: salamander\n    obfs-password: "%s"\n' "$obfp"
@@ -552,13 +616,13 @@ _build_links() {
       tuic)
         local uuid pass sni
         uuid=$(jq -r '.uuid' <<<"$n"); pass=$(jq -r '.password' <<<"$n"); sni=$(jq -r '.sni' <<<"$n")
-        link="tuic://${uuid}:${pass}@${host}:${port}?sni=${sni}&alpn=h3&congestion_control=bbr&udp_relay_mode=native&allow_insecure=1#${enc_tag}"
+        link="tuic://${uuid}:${pass}@${host}:${port}?sni=${sni}&alpn=h3&congestion_control=bbr&udp_relay_mode=native&allow_insecure=1#${enc_name}"
         printf '  - name: "%s"\n    type: tuic\n    server: "%s"\n    port: %s\n    uuid: %s\n    password: "%s"\n    sni: %s\n    skip-cert-verify: true\n    congestion-controller: bbr\n    alpn:\n      - h3\n    udp: true\n' "$tag" "$ip" "$port" "$uuid" "$pass" "$sni" >> "$yaml_file"
         ;;
       anytls)
         local user pass sni
         user=$(jq -r '.username' <<<"$n"); pass=$(jq -r '.password' <<<"$n"); sni=$(jq -r '.sni' <<<"$n")
-        link="anytls://${user}:${pass}@${host}:${port}?sni=${sni}&insecure=1#${enc_tag}"
+        link="anytls://${user}:${pass}@${host}:${port}?sni=${sni}&insecure=1#${enc_name}"
         printf '  - name: "%s"\n    type: anytls\n    server: "%s"\n    port: %s\n    username: %s\n    password: "%s"\n    sni: %s\n    skip-cert-verify: true\n' "$tag" "$ip" "$port" "$user" "$pass" "$sni" >> "$yaml_file"
         ;;
       mieru)
@@ -572,14 +636,14 @@ _build_links() {
         local cipher pass userinfo
         cipher=$(jq -r '.cipher' <<<"$n"); pass=$(jq -r '.password' <<<"$n")
         userinfo=$(_b64_nopad "${cipher}:${pass}")
-        link="ss://${userinfo}@${host}:${port}#${enc_tag}"
+        link="ss://${userinfo}@${host}:${port}#${enc_name}"
         printf '  - name: "%s"\n    type: ss\n    server: "%s"\n    port: %s\n    cipher: %s\n    password: "%s"\n    udp: true\n' "$tag" "$ip" "$port" "$cipher" "$pass" >> "$yaml_file"
         ;;
       trojan-reality)
         local pass pbk sid sni
         pass=$(jq -r '.password' <<<"$n"); pbk=$(jq -r '.public_key' <<<"$n")
         sid=$(jq -r '.short_id' <<<"$n"); sni=$(jq -r '.sni' <<<"$n")
-        link="trojan://${pass}@${host}:${port}?security=reality&sni=${sni}&fp=chrome&pbk=${pbk}&sid=${sid}&type=tcp#${enc_tag}"
+        link="trojan://${pass}@${host}:${port}?security=reality&sni=${sni}&fp=chrome&pbk=${pbk}&sid=${sid}&type=tcp#${enc_name}"
         printf '  - name: "%s"\n    type: trojan\n    server: "%s"\n    port: %s\n    password: "%s"\n    udp: true\n    sni: %s\n    client-fingerprint: chrome\n    reality-opts:\n      public-key: %s\n      short-id: "%s"\n' "$tag" "$ip" "$port" "$pass" "$sni" "$pbk" "$sid" >> "$yaml_file"
         ;;
     esac
@@ -902,6 +966,23 @@ _ask_port() {
   ASK_PORT_RESULT="$p"
 }
 
+# 传输层选择(仅 mieru): 传当前值, 结果存 ASK_TRANSPORT_RESULT; 空输入保留当前值
+# 添加与修改共用同一套解析, 避免两处规则漂移
+_ask_transport() {
+  local cur t
+  cur=$(printf '%s' "${1:-TCP}" | tr 'a-z' 'A-Z' | tr -d '[:space:]')
+  [ "$cur" = "UDP" ] || cur="TCP"
+  read -rp "传输层 1) TCP  2) UDP [当前 ${cur}]: " t || t=""
+  t=$(printf '%s' "${t%$'\r'}" | tr -d '[:space:]' | tr 'a-z' 'A-Z')
+  case "$t" in
+    1|TCP) ASK_TRANSPORT_RESULT="TCP" ;;
+    2|UDP) ASK_TRANSPORT_RESULT="UDP" ;;
+    "")    ASK_TRANSPORT_RESULT="$cur" ;;
+    *)     _warn "输入 '${t}' 无法识别，保留 ${cur}。"; ASK_TRANSPORT_RESULT="$cur" ;;
+  esac
+  _info "传输层: ${ASK_TRANSPORT_RESULT}"
+}
+
 # [1] VLESS + XHTTP + Reality（首选：XHTTP 把流量拆成标准 HTTP 请求序列，抗主动探测强，可套 CDN）
 _add_vless_xhttp() {
   _ask_port "请输入 VLESS-XHTTP-Reality 端口" rand || return 1
@@ -926,7 +1007,7 @@ _add_vless_xhttp() {
     *) mode="auto" ;;
   esac
   _ask_ip_ver
-  _ask_node_name "VLESS-XHTTP"
+  _ask_node_name "VLESS-XHTTP" "$port"
   local node
   node=$(jq -cn --arg tag "vless-x-${port}" --arg name "$NODE_NAME" --arg port "$port" --arg ipver "$IP_VER" \
     --arg uuid "$uuid" --arg pk "$pk" --arg pub "$pub" --arg sid "$sid" --arg sni "$sni" \
@@ -957,7 +1038,7 @@ _add_vless_reality() {
     read -rp "粘贴服务端 decryption 字符串 (留空跳过): " enc
   fi
   _ask_ip_ver
-  _ask_node_name "VLESS-Reality"
+  _ask_node_name "VLESS-Reality" "$port"
   local node
   node=$(jq -cn --arg tag "vless-r-${port}" --arg name "$NODE_NAME" --arg port "$port" --arg ipver "$IP_VER" \
     --arg uuid "$uuid" --arg pk "$pk" --arg pub "$pub" --arg sid "$sid" --arg sni "$sni" --arg dec "$enc" \
@@ -980,7 +1061,7 @@ _add_hysteria2() {
   local ck; ck=$(_gen_selfsigned_cert "$sni" "hy2-${port}") || return 1
   local crt="${ck%%|*}" key="${ck##*|}"
   _ask_ip_ver
-  _ask_node_name "HY2"
+  _ask_node_name "HY2" "$port"
   local node
   node=$(jq -cn --arg tag "hy2-${port}" --arg name "$NODE_NAME" --arg port "$port" --arg pass "$pass" --arg ipver "$IP_VER" \
     --arg obfs "$obfs" --arg obfp "$obfp" --arg crt "$crt" --arg key "$key" --arg sni "$sni" --arg masq "$masq" \
@@ -999,7 +1080,7 @@ _add_tuic() {
   read -rp "认证密码 [${pass}]: " p; pass="${p:-$pass}"
   local ck; ck=$(_gen_selfsigned_cert "$sni" "tuic-${port}") || return 1
   _ask_ip_ver
-  _ask_node_name "TUIC"
+  _ask_node_name "TUIC" "$port"
   local node
   node=$(jq -cn --arg tag "tuic-${port}" --arg name "$NODE_NAME" --arg port "$port" --arg ipver "$IP_VER" \
     --arg uuid "$uuid" --arg pass "$pass" --arg crt "${ck%%|*}" --arg key "${ck##*|}" --arg sni "$sni" \
@@ -1018,7 +1099,7 @@ _add_anytls() {
   read -rp "认证密码 [${pass}]: " p; pass="${p:-$pass}"
   local ck; ck=$(_gen_selfsigned_cert "$sni" "anytls-${port}") || return 1
   _ask_ip_ver
-  _ask_node_name "AnyTLS"
+  _ask_node_name "AnyTLS" "$port"
   local node
   node=$(jq -cn --arg tag "anytls-${port}" --arg name "$NODE_NAME" --arg port "$port" --arg ipver "$IP_VER" \
     --arg user "$user" --arg pass "$pass" --arg crt "${ck%%|*}" --arg key "${ck##*|}" --arg sni "$sni" \
@@ -1031,15 +1112,11 @@ _add_anytls() {
 _add_mieru() {
   _ask_port "请输入 Mieru 端口" rand || return 1
   local port="$ASK_PORT_RESULT" user pass transport
-  read -rp "传输层 1) TCP  2) UDP [1]: " t
-  case "${t^^}" in
-    2|UDP) transport="UDP" ;;
-    *) transport="TCP" ;;
-  esac
+  _ask_transport "TCP"; transport="$ASK_TRANSPORT_RESULT"
   user="u1"; pass=$(_gen_hex 16)
   read -rp "认证密码 [${pass}]: " p; pass="${p:-$pass}"
   _ask_ip_ver
-  _ask_node_name "Mieru"
+  _ask_node_name "Mieru" "$port"
   local node
   node=$(jq -cn --arg tag "mieru-${port}" --arg name "$NODE_NAME" --arg port "$port" --arg ipver "$IP_VER" \
     --arg user "$user" --arg pass "$pass" --arg tr "$transport" \
@@ -1066,7 +1143,7 @@ _add_ss2022() {
   decoded_len=$(printf '%s' "$pass" | base64 -d 2>/dev/null | wc -c)
   [ "$decoded_len" = "$len" ] || { _error "密码不是合法 base64 或解码长度不等于 ${len} 字节，请重新添加。"; return 1; }
   _ask_ip_ver
-  _ask_node_name "SS2022"
+  _ask_node_name "SS2022" "$port"
   local node
   node=$(jq -cn --arg tag "ss-${port}" --arg name "$NODE_NAME" --arg port "$port" --arg ipver "$IP_VER" \
     --arg cipher "$cipher" --arg pass "$pass" \
@@ -1090,7 +1167,7 @@ _add_trojan_reality() {
   [ -z "$pk" ] || [ -z "$pub" ] && { _error "Reality 密钥对生成失败。"; return 1; }
   sid=$(_gen_hex 4)
   _ask_ip_ver
-  _ask_node_name "Trojan-Reality"
+  _ask_node_name "Trojan-Reality" "$port"
   local node
   node=$(jq -cn --arg tag "trojan-r-${port}" --arg name "$NODE_NAME" --arg port "$port" --arg ipver "$IP_VER" \
     --arg pass "$pass" --arg pk "$pk" --arg pub "$pub" --arg sid "$sid" --arg sni "$sni" \
@@ -1113,7 +1190,7 @@ _create_argo_ws_listener() {
   uuid=$(_gen_uuid)
   path="/$(_gen_hex 8)"
   _ask_ip_ver
-  _ask_node_name "Argo-${proto}"
+  _ask_node_name "Argo-${proto}" "$port"
   local node
   node=$(jq -cn --arg tag "argo-${port}" --arg name "$NODE_NAME" --arg port "$port" --arg ipver "$IP_VER" \
     --arg proto "$proto" --arg uuid "$uuid" --arg path "$path" \
@@ -1162,7 +1239,19 @@ _modify_node_menu() {
   port=$(jq -r --argjson i "$idx" '.nodes[$i].port' "$METADATA_FILE")
 
   local new_name="$name" new_port="$port" v
-  read -rp "节点名称 [${name}]: " v; new_name="${v:-$name}"
+  read -rp "节点名称 [${name}]: " v || v=""
+  v=$(_normalize_name "$v")
+  [ -n "$v" ] && new_name="$v"
+  # 改名后做一次去重(排除自身), 否则客户端 proxies 会撞名
+  if [ "$new_name" != "$name" ]; then
+    local clash
+    clash=$(jq -r --arg nm "$new_name" '[.nodes[]? | select(.name == $nm)] | length' "$METADATA_FILE" 2>/dev/null)
+    if [ "${clash:-0}" -gt 0 ] 2>/dev/null; then
+      _warn "名称 ${new_name} 已被其它节点使用，保留原名 ${name}。"
+      new_name="$name"
+    fi
+  fi
+  _info "节点名称: ${new_name}"
   read -rp "端口 [${port}]: " v
   if [ -n "$v" ] && [ "$v" != "$port" ]; then
     # _check_port_conflict 约定: 返回 0=冲突, 返回 1=可用
@@ -1181,7 +1270,7 @@ _modify_node_menu() {
   esac
 
   # 需要更新的值(默认=原值)与对应的 jq filter 片段
-  local sni uuid pass obfp path domain
+  local sni uuid pass obfp path domain transport
   local filter=""
   case "$proto" in
     vless-xhttp)
@@ -1210,10 +1299,18 @@ _modify_node_menu() {
       read -rp "混淆密码 [${obfp}]: " v; obfp="${v:-$obfp}"
       filter=' | .password = $pass | .obfs_password = $obfp'
       ;;
-    tuic|anytls|mieru)
+    tuic|anytls)
       pass=$(jq -r --argjson i "$idx" '.nodes[$i].password // ""' "$METADATA_FILE")
       read -rp "认证密码 [${pass}]: " v; pass="${v:-$pass}"
       filter=' | .password = $pass'
+      ;;
+    mieru)
+      pass=$(jq -r --argjson i "$idx" '.nodes[$i].password // ""' "$METADATA_FILE")
+      read -rp "认证密码 [${pass}]: " v; pass="${v:-$pass}"
+      # 传输层可在线切换: TCP <-> UDP, 回车保留当前值
+      _ask_transport "$(jq -r --argjson i "$idx" '.nodes[$i].transport // "TCP"' "$METADATA_FILE")"
+      transport="$ASK_TRANSPORT_RESULT"
+      filter=' | .password = $pass | .transport = $transport'
       ;;
     ss2022)
       pass=$(jq -r --argjson i "$idx" '.nodes[$i].password // ""' "$METADATA_FILE")
@@ -1253,7 +1350,20 @@ _modify_node_menu() {
   [ "$new_port" != "$port" ] && new_tag="${tag%-$port}-${new_port}"
 
   local tmp="${METADATA_FILE}.tmp"
-  if jq --argjson i "$idx" --arg name "$new_name" --argjson port "$new_port" --arg tag "$new_tag" --arg ipver "$ip_ver_new"      --arg sni "${sni:-}" --arg uuid "${uuid:-}" --arg pass "${pass:-}" --arg obfp "${obfp:-}"      --arg path "${path:-}" --arg domain "${domain:-}"      ".nodes[\$i] |= (.name = \$name | .port = \$port | .tag = \$tag | .ip_ver = \$ipver${filter})"      "$METADATA_FILE" > "$tmp" && [ -s "$tmp" ]; then
+  if jq --argjson i "$idx" \
+        --arg name "$new_name" \
+        --argjson port "$new_port" \
+        --arg tag "$new_tag" \
+        --arg ipver "$ip_ver_new" \
+        --arg sni "${sni:-}" \
+        --arg uuid "${uuid:-}" \
+        --arg pass "${pass:-}" \
+        --arg obfp "${obfp:-}" \
+        --arg path "${path:-}" \
+        --arg domain "${domain:-}" \
+        --arg transport "${transport:-}" \
+        ".nodes[\$i] |= (.name = \$name | .port = \$port | .tag = \$tag | .ip_ver = \$ipver${filter})" \
+        "$METADATA_FILE" > "$tmp" && [ -s "$tmp" ]; then
     mv "$tmp" "$METADATA_FILE"
   else
     rm -f "$tmp"
@@ -1411,7 +1521,7 @@ _add_argo_node() {
   echo "1) 临时隧道 (trycloudflare.com, 域名随机)  2) 固定隧道 (Cloudflare Tunnel Token)"
   read -rp "选择隧道模式 [1]: " m
   _ask_ip_ver
-  _ask_node_name "Argo-${proto}"
+  _ask_node_name "Argo-${proto}" "$port"
   if [[ "$m" = "2" ]]; then
     read -rp "粘贴 Cloudflare Tunnel Token: " token
     [ -z "$token" ] && { _error "Token 不能为空。"; return 1; }

@@ -1,6 +1,6 @@
 # mihomo-lite
 
-> 版本：v1.5.3
+> 版本：v1.5.4
 >
 > **⚠️ 测试阶段（BETA）**：本项目当前处于测试阶段，功能与配置格式可能随时调整，请勿在生产环境使用。
 
@@ -38,7 +38,8 @@ mihomo 内核多协议服务端一键管理脚本，交互风格参考 [singbox-
 
 - 中文交互菜单：添加 / 删除 / **修改**节点、查看链接、重启 / 停止、状态、日志、卸载
 - 8 种协议：XHTTP+Reality（首选）/ Reality+Vision / Hysteria2 / TUIC v5 / AnyTLS / Mieru / SS2022 / Trojan-Reality
-- 节点默认命名「国家-运营商-协议」，可自定义覆盖
+- 节点默认命名「国家-运营商-协议-端口」，可自定义覆盖；重名自动追加 `-2/-3`（客户端 proxies 不允许同名）
+- 修改节点时 Mieru 可在 **TCP / UDP** 之间在线切换，改完自动重建配置并重启
 - 对外端口默认随机空闲端口（避免撞车），Argo 回源端口固定 8888（仅监听 127.0.0.1）
 - 节点可选对外 **IPv4 / IPv6**：双栈机器添加时选择、单栈机器自动采用，纯 IPv6 机器自动以 `::` 监听
 - 按 CPU 能力选择内核（x86-64-v3 优化版 / compatible 兼容版），老 CPU 可正常运行
@@ -47,6 +48,22 @@ mihomo 内核多协议服务端一键管理脚本，交互风格参考 [singbox-
 - 支持 systemd / OpenRC / 无 init 直跑三种模式
 - 重启前 `mihomo -t` 配置校验 + 启动后存活兜底检查
 - SS2022 严格长度密钥校验（避免运行期 `decode psk` 错误）
+
+## SNI 伪装域名
+
+添加 TLS 类节点（Hysteria2 / TUIC / AnyTLS / Reality / XHTTP）时，默认从随机池四选一：
+
+```
+aws.amazon.com  www.amd.com  www.amazon.com  www.microsoft.com
+```
+
+回车即用随机值，也可手动输入覆盖。需要锁定单一值时用环境变量（跳过随机）：
+
+```bash
+SNI_DEFAULT=aws.amazon.com bash mihomo-lite.sh
+```
+
+自签证书的 CN 跟随所选 SNI，Reality 的 `dest` 也直接取该域名 `:443`。
 
 ## Argo 隧道
 

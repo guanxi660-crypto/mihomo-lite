@@ -17,7 +17,7 @@
 umask 077
 export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin${PATH:+:$PATH}"
 
-SCRIPT_VERSION="1.5.10"
+SCRIPT_VERSION="1.5.11"
 MIHOMO_DIR="/etc/mihomo-lite"
 MIHOMO_BIN="/usr/local/bin/mihomo"
 CLOUDFLARED_BIN="/usr/local/bin/cloudflared"
@@ -176,9 +176,6 @@ _ask_argo_protocol() {
   fi
 }
 
-# Argo 节点命名用的协议标签(与其它协议的大写风格保持一致: 地区-运营商-Argo-VLESS-WS-端口)
-_argo_proto_label() { [ "$1" = "vmess-ws" ] && echo "Argo-VMESS-WS" || echo "Argo-VLESS-WS"; }
-
 _detect_init_system() {
   if [ -f /sbin/openrc-run ] || command -v rc-service >/dev/null 2>&1; then
     INIT_SYSTEM="openrc"
@@ -232,7 +229,25 @@ _geo_node_name() {
     [ -n "$cut" ] && isp="$cut"
     [ -z "$isp" ] && isp="ISP"
   fi
-  echo "${cc}-${isp}-${proto_label}"
+  echo "${cc}.${isp}.${proto_label}"
+}
+
+# 协议 → 默认名后缀(点分风格): 地区.运营商.<这里>
+# 约定: 用 . 分隔, 不带端口; 隧道类带 Argo.协议.传输.安全; 只有简称的协议首字母大写(Hy2 / Tuic / Reality)
+_proto_label() {
+  case "$1" in
+    vless-xhttp)    echo "Vless.xhttp.reality" ;;
+    vless-reality)  echo "Reality" ;;
+    hysteria2)      echo "Hy2" ;;
+    tuic)           echo "Tuic" ;;
+    anytls)         echo "AnyTls" ;;
+    mieru)          echo "Mieru" ;;
+    ss2022)         echo "SS2022" ;;
+    trojan-reality) echo "Trojan.Reality" ;;
+    vless-ws)       echo "Argo.Vless.ws.tls" ;;
+    vmess-ws)       echo "Argo.Vmess.ws.tls" ;;
+    *)              echo "$1" ;;
+  esac
 }
 
 # 名称清洗: 去 \r、首尾空白与成对包裹的引号 (添加/修改两条路径共用)
@@ -252,7 +267,7 @@ _unique_node_name() {
   local base="$1" cand="$1" n=2
   if [ -s "$METADATA_FILE" ] && command -v jq >/dev/null 2>&1; then
     while jq -e --arg nm "$cand" 'any(.nodes[]?; .name == $nm)' "$METADATA_FILE" >/dev/null 2>&1; do
-      cand="${base}-${n}"; n=$((n+1))
+      cand="${base}.${n}"; n=$((n+1))
       [ "$n" -gt 99 ] && break
     done
   fi
@@ -262,12 +277,11 @@ _unique_node_name() {
   NODE_NAME="$cand"
 }
 
-# 节点命名交互: 传协议显示名(+可选端口, 端口进默认名保证唯一), 结果存 NODE_NAME
+# 节点命名交互: 传默认名后缀(见 _proto_label), 结果存 NODE_NAME
 # 注意: 输入被吞(空行/EOF/paste 带 \r)时不能静默用默认名, 这里会清洗并回显最终名称
 _ask_node_name() {
   local def nm
   def=$(_geo_node_name "$1")
-  [ -n "${2:-}" ] && def="${def}-$2"
   read -rp "节点名称 [${def}]: " nm || nm=""
   nm=$(_normalize_name "$nm")
   if [ -n "$nm" ]; then
@@ -308,20 +322,44 @@ _gen_selfsigned_cert() {
   echo "${crt}|${key}"
 }
 
-# 一次性迁移: 旧版 Argo 节点默认名里协议是小写(…-Argo-vless-ws), 与其它协议的大写风格不一致
-# 只改命中旧默认模式的 ws 节点名, 手改过的自定义名不受影响
+# 一次性迁移: 旧命名(CC-ISP-协议[-端口] 或 …-Argo-vless-ws) → 点分风格 CC.ISP.协议[.传输][.tls]
+# 只迁移命中旧自动命名模式的节点, 手改过的自定义名原样保留
 _migrate_node_names() {
   [ -s "$METADATA_FILE" ] || return 0
   local n
-  n=$(jq -r '[.nodes[]? | select(.proto == "vless-ws" or .proto == "vmess-ws") | select((.name // "") | test("-Argo-vless-ws|-Argo-vmess-ws"))] | length' "$METADATA_FILE" 2>/dev/null)
+  n=$(jq -r '[.nodes[]? | select((.name // "") | test("-HY2$|-TUIC$|-AnyTLS$|-Mieru$|-SS2022$|-VLESS-XHTTP$|-VLESS-Reality$|-Trojan-Reality$|-Argo-vless-ws$|-Argo-vmess-ws$|-Argo-VLESS-WS$|-Argo-VMESS-WS$|-[A-Za-z0-9.]+-[0-9]+$"))] | length' "$METADATA_FILE" 2>/dev/null)
   [ "${n:-0}" -gt 0 ] 2>/dev/null || return 0
   local tmp="${METADATA_FILE}.tmp"
-  if jq '.nodes |= map(
-        if (.proto == "vless-ws" or .proto == "vmess-ws") and .name
-        then .name |= (sub("-Argo-vless-ws"; "-Argo-VLESS-WS") | sub("-Argo-vmess-ws"; "-Argo-VMESS-WS"))
-        else . end)' "$METADATA_FILE" > "$tmp" && [ -s "$tmp" ]; then
+  if jq '
+      def newname:
+        (sub("-[0-9]+$"; "")) as $base
+        | ($base
+            | sub("-Argo-vless-ws$"; ".Argo.Vless.ws.tls")
+            | sub("-Argo-VMESS-WS$"; ".Argo.Vmess.ws.tls")
+            | sub("-Argo-vmess-ws$"; ".Argo.Vmess.ws.tls")
+            | sub("-Argo-VLESS-WS$"; ".Argo.Vless.ws.tls")
+            | sub("-VLESS-XHTTP$"; ".Vless.xhttp.reality")
+            | sub("-VLESS-Reality$"; ".Reality")
+            | sub("-Trojan-Reality$"; ".Trojan.Reality")
+            | sub("-HY2$"; ".Hy2")
+            | sub("-TUIC$"; ".Tuic")
+            | sub("-AnyTLS$"; ".AnyTls")
+            | sub("-Mieru$"; ".Mieru")
+            | sub("-SS2022$"; ".SS2022")) as $conv
+        | if $conv == $base then .
+          else ($conv | sub("^(?<cc>[A-Za-z]{2})-"; "\(.cc).")) end;
+      .nodes |= (reduce .[] as $n ({seen:{}, out:[]};
+          ($n.name // "") as $raw
+          | (if $raw == "" then "" else ($raw | newname) end) as $nm
+          | if $nm == "" then .out += [$n]
+            else
+              (.seen[$nm] // 0) as $c
+              | (if $c == 0 then $nm else "\($nm).\($c + 1)" end) as $final
+              | .seen[$nm] = ($c + 1)
+              | .out += [$n + {name: $final}]
+            end) | .out)' "$METADATA_FILE" > "$tmp" && [ -s "$tmp" ]; then
     mv "$tmp" "$METADATA_FILE"
-    _info "已把 ${n} 个 Argo 节点名统一为 地区-运营商-Argo-VLESS-WS-端口 风格。"
+    _info "节点名已迁移为点分风格(地区.运营商.协议)，共 ${n} 个。"
   else
     rm -f "$tmp"
   fi
@@ -1090,7 +1128,7 @@ _add_vless_xhttp() {
     *) mode="auto" ;;
   esac
   _ask_ip_ver
-  _ask_node_name "VLESS-XHTTP" "$port"
+  _ask_node_name "$(_proto_label vless-xhttp)"
   local node
   node=$(jq -cn --arg tag "vless-x-${port}" --arg name "$NODE_NAME" --arg port "$port" --arg ipver "$IP_VER" \
     --arg uuid "$uuid" --arg pk "$pk" --arg pub "$pub" --arg sid "$sid" --arg sni "$sni" \
@@ -1121,7 +1159,7 @@ _add_vless_reality() {
     read -rp "粘贴服务端 decryption 字符串 (留空跳过): " enc
   fi
   _ask_ip_ver
-  _ask_node_name "VLESS-Reality" "$port"
+  _ask_node_name "$(_proto_label vless-reality)"
   local node
   node=$(jq -cn --arg tag "vless-r-${port}" --arg name "$NODE_NAME" --arg port "$port" --arg ipver "$IP_VER" \
     --arg uuid "$uuid" --arg pk "$pk" --arg pub "$pub" --arg sid "$sid" --arg sni "$sni" --arg dec "$enc" \
@@ -1144,7 +1182,7 @@ _add_hysteria2() {
   local ck; ck=$(_gen_selfsigned_cert "$sni" "hy2-${port}") || return 1
   local crt="${ck%%|*}" key="${ck##*|}"
   _ask_ip_ver
-  _ask_node_name "HY2" "$port"
+  _ask_node_name "$(_proto_label hysteria2)"
   local node
   node=$(jq -cn --arg tag "hy2-${port}" --arg name "$NODE_NAME" --arg port "$port" --arg pass "$pass" --arg ipver "$IP_VER" \
     --arg obfs "$obfs" --arg obfp "$obfp" --arg crt "$crt" --arg key "$key" --arg sni "$sni" --arg masq "$masq" \
@@ -1163,7 +1201,7 @@ _add_tuic() {
   read -rp "认证密码 [${pass}]: " p; pass="${p:-$pass}"
   local ck; ck=$(_gen_selfsigned_cert "$sni" "tuic-${port}") || return 1
   _ask_ip_ver
-  _ask_node_name "TUIC" "$port"
+  _ask_node_name "$(_proto_label tuic)"
   local node
   node=$(jq -cn --arg tag "tuic-${port}" --arg name "$NODE_NAME" --arg port "$port" --arg ipver "$IP_VER" \
     --arg uuid "$uuid" --arg pass "$pass" --arg crt "${ck%%|*}" --arg key "${ck##*|}" --arg sni "$sni" \
@@ -1182,7 +1220,7 @@ _add_anytls() {
   read -rp "认证密码 [${pass}]: " p; pass="${p:-$pass}"
   local ck; ck=$(_gen_selfsigned_cert "$sni" "anytls-${port}") || return 1
   _ask_ip_ver
-  _ask_node_name "AnyTLS" "$port"
+  _ask_node_name "$(_proto_label anytls)"
   local node
   node=$(jq -cn --arg tag "anytls-${port}" --arg name "$NODE_NAME" --arg port "$port" --arg ipver "$IP_VER" \
     --arg user "$user" --arg pass "$pass" --arg crt "${ck%%|*}" --arg key "${ck##*|}" --arg sni "$sni" \
@@ -1199,7 +1237,7 @@ _add_mieru() {
   user="u1"; pass=$(_gen_hex 16)
   read -rp "认证密码 [${pass}]: " p; pass="${p:-$pass}"
   _ask_ip_ver
-  _ask_node_name "Mieru" "$port"
+  _ask_node_name "$(_proto_label mieru)"
   local node
   node=$(jq -cn --arg tag "mieru-${port}" --arg name "$NODE_NAME" --arg port "$port" --arg ipver "$IP_VER" \
     --arg user "$user" --arg pass "$pass" --arg tr "$transport" \
@@ -1226,7 +1264,7 @@ _add_ss2022() {
   decoded_len=$(printf '%s' "$pass" | base64 -d 2>/dev/null | wc -c)
   [ "$decoded_len" = "$len" ] || { _error "密码不是合法 base64 或解码长度不等于 ${len} 字节，请重新添加。"; return 1; }
   _ask_ip_ver
-  _ask_node_name "SS2022" "$port"
+  _ask_node_name "$(_proto_label ss2022)"
   local node
   node=$(jq -cn --arg tag "ss-${port}" --arg name "$NODE_NAME" --arg port "$port" --arg ipver "$IP_VER" \
     --arg cipher "$cipher" --arg pass "$pass" \
@@ -1250,7 +1288,7 @@ _add_trojan_reality() {
   [ -z "$pk" ] || [ -z "$pub" ] && { _error "Reality 密钥对生成失败。"; return 1; }
   sid=$(_gen_hex 4)
   _ask_ip_ver
-  _ask_node_name "Trojan-Reality" "$port"
+  _ask_node_name "$(_proto_label trojan-reality)"
   local node
   node=$(jq -cn --arg tag "trojan-r-${port}" --arg name "$NODE_NAME" --arg port "$port" --arg ipver "$IP_VER" \
     --arg pass "$pass" --arg pk "$pk" --arg pub "$pub" --arg sid "$sid" --arg sni "$sni" \
@@ -1276,7 +1314,7 @@ _create_argo_ws_listener() {
   path="/$(_gen_hex 8)"
   # 复用外部 cloudflared 时协议由用户自己的隧道配置决定, 这里不问; WS 监听只在 127.0.0.1
   IP_VER="v4"
-  _ask_node_name "$(_argo_proto_label "$proto")" "$port"
+  _ask_node_name "$(_proto_label "$proto")"
   local node
   node=$(jq -cn --arg tag "argo-${port}" --arg name "$NODE_NAME" --arg port "$port" --arg ipver "$IP_VER" \
     --arg proto "$proto" --arg uuid "$uuid" --arg path "$path" \
@@ -1623,7 +1661,7 @@ _add_argo_node() {
   # Argo 节点对外只走 Cloudflare 域名, 与本机对外 IP 版本无关; 这里问的是 cloudflared 的传输协议
   _ask_argo_protocol
   IP_VER="v4"
-  _ask_node_name "$(_argo_proto_label "$proto")" "$port"
+  _ask_node_name "$(_proto_label "$proto")"
   if [[ "$m" = "2" ]]; then
     read -rp "粘贴 Cloudflare Tunnel Token: " token
     [ -z "$token" ] && { _error "Token 不能为空。"; return 1; }
@@ -1702,7 +1740,7 @@ _modify_argo_menu() {
 
   # 0) 节点名称(Argo 节点不在【节点修改】列表里, 改名只能在这里)
   new_name="$cur_name"
-  read -rp "节点名称 [${cur_name:-地区-运营商-Argo-VLESS-WS-端口}]: " v || v=""
+  read -rp "节点名称 [${cur_name:-地区.运营商.Argo.Vless.ws.tls}]: " v || v=""
   v=$(_normalize_name "$v")
   [ -n "$v" ] && new_name="$v"
   if [ -n "$new_name" ] && [ "$new_name" != "$cur_name" ]; then

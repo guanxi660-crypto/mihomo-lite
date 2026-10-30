@@ -17,7 +17,7 @@
 umask 077
 export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin${PATH:+:$PATH}"
 
-SCRIPT_VERSION="1.5.12"
+SCRIPT_VERSION="1.5.13"
 MIHOMO_DIR="/etc/mihomo-lite"
 MIHOMO_BIN="/usr/local/bin/mihomo"
 CLOUDFLARED_BIN="/usr/local/bin/cloudflared"
@@ -962,18 +962,25 @@ EOF
 }
 
 # 直跑模式 / systemd 辅助启动脚本（固定隧道与临时隧道共用）
-# 协议来源优先级: 环境变量 ARGO_PROTOCOL > metadata 里 .argo.protocol(添加时选的) > 默认 "http2 quic" 回退
+# 协议来源优先级: 环境变量 ARGO_PROTOCOL > metadata 里 .argo.protocol(添加时选的) > 默认 http2
+# 选定协议先跑 20 秒, 退出则自动换另一条并记日志; ARGO_NO_FALLBACK=1 时只跑选定协议
 # 连接 CF 边缘的 IP 版本: metadata 里 .argo.edge_ip (4 / 6 / auto)，auto 时不加参数由 cloudflared 自选
 _write_argo_runner() {
   local mode="$1" token="$2" port="$3"
-  local proto_meta proto_list edge edge_flag=""
+  local proto_meta primary other proto_list edge edge_flag=""
   proto_meta=$(jq -r '.argo.protocol // ""' "$METADATA_FILE" 2>/dev/null)
-  if [ -n "${ARGO_PROTOCOL:-}" ]; then
-    proto_list="$ARGO_PROTOCOL"
-  elif [ -n "$proto_meta" ]; then
-    proto_list="$proto_meta"
+  primary="${ARGO_PROTOCOL:-$proto_meta}"
+  case "$primary" in
+    http2|quic) ;;
+    *) primary="http2" ;;
+  esac
+  # 选定协议先上; 20 秒内退出说明这条路不通(常见: 机房封 UDP 7844, quic 直接失败),
+  # 自动换另一条并在日志里写清楚。ARGO_NO_FALLBACK=1 时只跑选定协议。
+  if [ "${ARGO_NO_FALLBACK:-0}" = "1" ]; then
+    proto_list="$primary"
   else
-    proto_list="http2 quic"
+    other="quic"; [ "$primary" = "quic" ] && other="http2"
+    proto_list="$primary $other"
   fi
   edge=$(jq -r '.argo.edge_ip // "auto"' "$METADATA_FILE" 2>/dev/null)
   [ -n "${ARGO_EDGE_IP:-}" ] && edge="$ARGO_EDGE_IP"
@@ -1007,6 +1014,24 @@ _write_argo_runner() {
     echo "exit 1"
   } > "${MIHOMO_DIR}/run-argo.sh"
   chmod 700 "${MIHOMO_DIR}/run-argo.sh"
+}
+
+# Argo 启动校验: cloudflared 起不来时把日志尾巴直接打出来, 别只留一句"没起来"
+_argo_start_check() {
+  local port="${1:-}"
+  sleep 3
+  if _service_active "$ARGO_SERVICE_NAME"; then
+    _success "cloudflared 已启动。"
+    return 0
+  fi
+  _error "cloudflared 没起来。最近日志:"
+  tail -n 15 "$ARGO_LOG" 2>/dev/null | sed 's/^/    /'
+  echo "    排查:"
+  echo "      1) 菜单 9 看完整日志 (${ARGO_LOG})"
+  echo "      2) quic 走 UDP/7844, http2 走 TCP/7844 —— 机房封 UDP 就选 http2"
+  echo "      3) 面板 Public Hostname 的 URL 必须是 127.0.0.1:${port:-回源端口}, Type=HTTP"
+  echo "      4) 固定隧道 token 与域名必须属于同一个 Cloudflare 账号的同一个隧道"
+  return 1
 }
 
 _start_service() {
@@ -1081,7 +1106,7 @@ _restart_all() {
 
 # ---------------- 节点添加 ----------------
 _ask_port() {
-  local prompt="$1" default="$2" p
+  local prompt="$1" default="$2" allow="${3:-}" p
   # 默认端口随机化(参考 singbox-lite): 传 "rand" 时在 10000-65535 内挑一个空闲端口,
   # 回车即用随机值, 也可手动输入覆盖
   if [ "$default" = "rand" ]; then
@@ -1094,6 +1119,11 @@ _ask_port() {
   fi
   read -rp "${prompt} [${default}]: " p
   p="${p:-$default}"
+  # allow: 本脚本自己的 argo 回源口, 会被自己的 listener 占着, 沿用不算冲突
+  if [ -n "$allow" ] && [ "$p" = "$allow" ]; then
+    ASK_PORT_RESULT="$p"
+    return 0
+  fi
   if _check_port_conflict "$p"; then return 1; fi
   ASK_PORT_RESULT="$p"
 }
@@ -1319,7 +1349,9 @@ _create_argo_ws_listener() {
   echo "1) VLESS + WS  2) VMess + WS"
   read -rp "选择 Argo 节点协议 [1]: " c
   [[ "$c" = "2" ]] && proto="vmess-ws" || proto="vless-ws"
-  _ask_port "本机 WS 监听端口 (Argo 回源端口, 仅 127.0.0.1)" 8888 || return 1
+  local cur_port
+  cur_port=$(jq -r 'if .argo.enabled == true then (.argo.port // "") else "" end' "$METADATA_FILE" 2>/dev/null)
+  _ask_port "本机 WS 监听端口 (Argo 回源端口, 仅 127.0.0.1)" "${cur_port:-8888}" "$cur_port" || return 1
   local port="$ASK_PORT_RESULT" uuid path
   uuid=$(_gen_uuid)
   path="/$(_gen_hex 8)"
@@ -1659,11 +1691,12 @@ _add_argo_node() {
       [[ "$r" =~ ^[Yy]$ ]] || { _info "已取消。"; return 0; }
     fi
   fi
-  local proto mode token domain
+  local proto mode token domain cur_port
   echo "1) VLESS + WS  2) VMess + WS"
   read -rp "选择 Argo 节点协议 [1]: " c
   [[ "$c" = "2" ]] && proto="vmess-ws" || proto="vless-ws"
-  _ask_port "本机 WS 监听端口 (Argo 回源端口, 仅 127.0.0.1)" 8888 || return 1
+  cur_port=$(jq -r 'if .argo.enabled == true then (.argo.port // "") else "" end' "$METADATA_FILE" 2>/dev/null)
+  _ask_port "本机 WS 监听端口 (Argo 回源端口, 仅 127.0.0.1)" "${cur_port:-8888}" "$cur_port" || return 1
   local port="$ASK_PORT_RESULT" uuid path
   uuid=$(_gen_uuid)
   path="/$(_gen_hex 8)"
@@ -1696,13 +1729,12 @@ _add_argo_node() {
   # 更新 argo 状态
   local tmp="${METADATA_FILE}.tmp"
   jq --arg mode "$mode" --arg token "$token" --arg domain "$domain" --argjson port "$port" --arg protocol "$ARGO_PROTO_RESULT" \
-    '.argo = {enabled:true, mode:$mode, token:$token, domain:$domain, port:$port, protocol:$protocol}' "$METADATA_FILE" > "$tmp" && mv "$tmp" "$METADATA_FILE"
-  _write_argo_runner "$mode" "$token" "$port"
+    '.argo = ((.argo // {}) + {enabled:true, mode:$mode, token:$token, domain:$domain, port:$port, protocol:$protocol})' "$METADATA_FILE" > "$tmp" && mv "$tmp" "$METADATA_FILE"
+  _write_argo_runner "$mode" "$token" "$port" || { _error "生成 run-argo.sh 失败(cloudflared 缺失?)"; return 1; }
   _create_services
   _regen_config; _restart_all
-  if [ "$mode" = "temp" ]; then
-    _probe_temp_domain
-  fi
+  _argo_start_check "$port"
+  [ "$mode" = "temp" ] && _probe_temp_domain
   _show_links
 }
 
@@ -1818,10 +1850,11 @@ _modify_argo_menu() {
        "$METADATA_FILE" > "$tmp" && mv "$tmp" "$METADATA_FILE"
   fi
 
-  _write_argo_runner "$mode" "$token" "$new_port"
+  _write_argo_runner "$mode" "$token" "$new_port" || { _error "生成 run-argo.sh 失败(cloudflared 缺失?)"; return 1; }
   _regen_config
   [ "$mode" = "temp" ] && : > "$ARGO_LOG"
   _restart_all
+  _argo_start_check "$new_port"
   if [ "$mode" = "temp" ]; then
     _info "临时隧道端口变更后域名会重新分配，等待探测..."
     _probe_temp_domain
@@ -1880,6 +1913,7 @@ _renew_temp_argo() {
   fi
   : > "$ARGO_LOG"
   _stop_service "$ARGO_SERVICE_NAME"; _start_service "$ARGO_SERVICE_NAME"
+  _argo_start_check "$(jq -r '.argo.port // 8888' "$METADATA_FILE")"
   _probe_temp_domain
 }
 

@@ -17,7 +17,7 @@
 umask 077
 export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin${PATH:+:$PATH}"
 
-SCRIPT_VERSION="1.5.9"
+SCRIPT_VERSION="1.5.10"
 MIHOMO_DIR="/etc/mihomo-lite"
 MIHOMO_BIN="/usr/local/bin/mihomo"
 CLOUDFLARED_BIN="/usr/local/bin/cloudflared"
@@ -176,6 +176,9 @@ _ask_argo_protocol() {
   fi
 }
 
+# Argo 节点命名用的协议标签(与其它协议的大写风格保持一致: 地区-运营商-Argo-VLESS-WS-端口)
+_argo_proto_label() { [ "$1" = "vmess-ws" ] && echo "Argo-VMESS-WS" || echo "Argo-VLESS-WS"; }
+
 _detect_init_system() {
   if [ -f /sbin/openrc-run ] || command -v rc-service >/dev/null 2>&1; then
     INIT_SYSTEM="openrc"
@@ -303,6 +306,25 @@ _gen_selfsigned_cert() {
     -nodes -subj "/CN=${sni}" -keyout "$key" -out "$crt" >/dev/null 2>&1
   [ -s "$crt" ] && [ -s "$key" ] || { _error "自签证书生成失败。"; return 1; }
   echo "${crt}|${key}"
+}
+
+# 一次性迁移: 旧版 Argo 节点默认名里协议是小写(…-Argo-vless-ws), 与其它协议的大写风格不一致
+# 只改命中旧默认模式的 ws 节点名, 手改过的自定义名不受影响
+_migrate_node_names() {
+  [ -s "$METADATA_FILE" ] || return 0
+  local n
+  n=$(jq -r '[.nodes[]? | select(.proto == "vless-ws" or .proto == "vmess-ws") | select((.name // "") | test("-Argo-vless-ws|-Argo-vmess-ws"))] | length' "$METADATA_FILE" 2>/dev/null)
+  [ "${n:-0}" -gt 0 ] 2>/dev/null || return 0
+  local tmp="${METADATA_FILE}.tmp"
+  if jq '.nodes |= map(
+        if (.proto == "vless-ws" or .proto == "vmess-ws") and .name
+        then .name |= (sub("-Argo-vless-ws"; "-Argo-VLESS-WS") | sub("-Argo-vmess-ws"; "-Argo-VMESS-WS"))
+        else . end)' "$METADATA_FILE" > "$tmp" && [ -s "$tmp" ]; then
+    mv "$tmp" "$METADATA_FILE"
+    _info "已把 ${n} 个 Argo 节点名统一为 地区-运营商-Argo-VLESS-WS-端口 风格。"
+  else
+    rm -f "$tmp"
+  fi
 }
 
 # ---------------- 元数据初始化 ----------------
@@ -623,11 +645,11 @@ _build_links() {
         [ -z "$domain" ] && domain=$(jq -r '.argo.domain // ""' "$METADATA_FILE" 2>/dev/null)
         [ -z "$domain" ] && continue
         if [ "$proto" = "vless-ws" ]; then
-          link="vless://${uuid}@${domain}:443?encryption=none&security=tls&type=ws&host=${domain}&path=$(_url_encode "$path")#arg-${enc_name}"
+          link="vless://${uuid}@${domain}:443?encryption=none&security=tls&type=ws&host=${domain}&path=$(_url_encode "$path")#${enc_name}"
           printf '  - name: "%s"\n    type: vless\n    server: "%s"\n    port: 443\n    uuid: %s\n    udp: true\n    tls: true\n    servername: %s\n    network: ws\n    ws-opts:\n      path: "%s"\n      headers:\n        Host: %s\n' "$tag" "$domain" "$uuid" "$domain" "$path" "$domain" >> "$yaml_file"
         else
           local vj
-          vj=$(jq -cn --arg v "2" --arg u "$uuid" --arg d "$domain" --arg t "$tag" --arg p "$path" '{v:$v,ps:("arg-"+$t),add:$d,port:"443",id:$u,aid:"0",scy:"auto",net:"ws",type:"none",host:$d,path:$p,tls:"tls"}')
+          vj=$(jq -cn --arg v "2" --arg u "$uuid" --arg d "$domain" --arg t "$tag" --arg p "$path" '{v:$v,ps:$t,add:$d,port:"443",id:$u,aid:"0",scy:"auto",net:"ws",type:"none",host:$d,path:$p,tls:"tls"}')
           link="vmess://$(_b64_nopad "$vj")"
           printf '  - name: "%s"\n    type: vmess\n    server: "%s"\n    port: 443\n    uuid: %s\n    alterId: 0\n    cipher: auto\n    udp: true\n    tls: true\n    servername: %s\n    network: ws\n    ws-opts:\n      path: "%s"\n      headers:\n        Host: %s\n' "$tag" "$domain" "$uuid" "$domain" "$path" "$domain" >> "$yaml_file"
         fi
@@ -1254,7 +1276,7 @@ _create_argo_ws_listener() {
   path="/$(_gen_hex 8)"
   # 复用外部 cloudflared 时协议由用户自己的隧道配置决定, 这里不问; WS 监听只在 127.0.0.1
   IP_VER="v4"
-  _ask_node_name "Argo-${proto}" "$port"
+  _ask_node_name "$(_argo_proto_label "$proto")" "$port"
   local node
   node=$(jq -cn --arg tag "argo-${port}" --arg name "$NODE_NAME" --arg port "$port" --arg ipver "$IP_VER" \
     --arg proto "$proto" --arg uuid "$uuid" --arg path "$path" \
@@ -1601,7 +1623,7 @@ _add_argo_node() {
   # Argo 节点对外只走 Cloudflare 域名, 与本机对外 IP 版本无关; 这里问的是 cloudflared 的传输协议
   _ask_argo_protocol
   IP_VER="v4"
-  _ask_node_name "Argo-${proto}" "$port"
+  _ask_node_name "$(_argo_proto_label "$proto")" "$port"
   if [[ "$m" = "2" ]]; then
     read -rp "粘贴 Cloudflare Tunnel Token: " token
     [ -z "$token" ] && { _error "Token 不能为空。"; return 1; }
@@ -1663,17 +1685,34 @@ _modify_argo_menu() {
     return 1
   fi
   local mode token domain port edge new_port new_domain new_edge v
+  local cur_name new_name
   mode=$(jq -r '.argo.mode // "temp"' "$METADATA_FILE")
   token=$(jq -r '.argo.token // ""' "$METADATA_FILE")
   domain=$(jq -r '.argo.domain // ""' "$METADATA_FILE")
   port=$(jq -r '.argo.port // 8888' "$METADATA_FILE")
   edge=$(jq -r '.argo.edge_ip // "auto"' "$METADATA_FILE")
+  cur_name=$(jq -r '[.nodes[]? | select(.proto == "vless-ws" or .proto == "vmess-ws") | .name][0] // ""' "$METADATA_FILE")
 
   echo "当前 Argo 配置:"
   echo "  模式: ${mode}   回源端口: ${port}"
+  echo "  节点名称: ${cur_name:-未设置}"
   echo "  域名: ${domain:-未设置(临时隧道启动后自动探测)}"
   echo "  连接 CF 边缘: ${edge}  (4=仅IPv4  6=仅IPv6  auto=cloudflared 自选)"
   echo ""
+
+  # 0) 节点名称(Argo 节点不在【节点修改】列表里, 改名只能在这里)
+  new_name="$cur_name"
+  read -rp "节点名称 [${cur_name:-地区-运营商-Argo-VLESS-WS-端口}]: " v || v=""
+  v=$(_normalize_name "$v")
+  [ -n "$v" ] && new_name="$v"
+  if [ -n "$new_name" ] && [ "$new_name" != "$cur_name" ]; then
+    local clash
+    clash=$(jq -r --arg nm "$new_name" '[.nodes[]? | select(.proto != "vless-ws" and .proto != "vmess-ws") | select(.name == $nm)] | length' "$METADATA_FILE" 2>/dev/null)
+    if [ "${clash:-0}" -gt 0 ] 2>/dev/null; then
+      _warn "名称 ${new_name} 已被其它节点使用，保留原名 ${cur_name}。"
+      new_name="$cur_name"
+    fi
+  fi
 
   # 1) 回源监听端口
   new_port="$port"
@@ -1705,14 +1744,16 @@ _modify_argo_menu() {
     *)           _warn "输入 '${v}' 无法识别，保留 ${edge}。"; new_edge="$edge" ;;
   esac
 
-  # 写回: argo 状态 + WS 节点(端口/tag), tag 形如 argo-端口, 端口变了要同步
+  # 写回: argo 状态 + WS 节点(名称/端口/tag), tag 形如 argo-端口, 端口变了要同步
   local tmp="${METADATA_FILE}.tmp"
-  if jq --argjson port "$new_port" --arg edge "$new_edge" \
+  if jq --argjson port "$new_port" --arg edge "$new_edge" --arg nm "$new_name" \
         --arg oldtag "argo-${port}" --arg newtag "argo-${new_port}" \
         '.argo.port = $port | .argo.edge_ip = $edge
          | .nodes |= map(
              if (.proto == "vless-ws" or .proto == "vmess-ws")
-             then .port = $port | .tag = (if .tag == $oldtag then $newtag else .tag end)
+             then .port = $port
+                  | .name = (if $nm == "" then .name else $nm end)
+                  | .tag = (if .tag == $oldtag then $newtag else .tag end)
              else . end)' "$METADATA_FILE" > "$tmp" && [ -s "$tmp" ]; then
     mv "$tmp" "$METADATA_FILE"
   else
@@ -1739,7 +1780,7 @@ _modify_argo_menu() {
     _warn "固定隧道需在 CF 面板把 Public Hostname 的 URL 改成 127.0.0.1:${new_port}，否则回源失败。"
   fi
   _show_links
-  _success "Argo 配置已更新 (端口 ${new_port} / 边缘 IP ${new_edge} / 域名 ${new_domain:-待探测})。"
+  _success "Argo 配置已更新 (名称 ${new_name:-未变} / 端口 ${new_port} / 边缘 IP ${new_edge} / 域名 ${new_domain:-待探测})。"
 }
 
 # 查看 Argo 隧道与节点(Argo 节点与隧道绑定, 不单独出现在节点修改里, 统一在这里看)
@@ -2002,6 +2043,7 @@ main() {
   _install_dependencies || exit 1
   _detect_init_system
   _init_metadata
+  _migrate_node_names
   mkdir -p "$MIHOMO_DIR" "$SUB_DIR" "$CERTS_DIR"
   # 生成直跑模式的 argo 启动脚本（若已有 argo 配置）
   if jq -e '.argo.enabled == true' "$METADATA_FILE" >/dev/null 2>&1; then

@@ -17,7 +17,7 @@
 umask 077
 export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin${PATH:+:$PATH}"
 
-SCRIPT_VERSION="1.5.13"
+SCRIPT_VERSION="1.5.14"
 MIHOMO_DIR="/etc/mihomo-lite"
 MIHOMO_BIN="/usr/local/bin/mihomo"
 CLOUDFLARED_BIN="/usr/local/bin/cloudflared"
@@ -1037,8 +1037,16 @@ _argo_start_check() {
 _start_service() {
   local name="$1"
   case "$INIT_SYSTEM" in
-    systemd) systemctl start "$name" ;;
-    openrc)  rc-service "$name" start ;;
+    systemd)
+      # 启动失败不能静默: 单元缺失/ExecStart 路径不对/权限问题都在这里暴露
+      if ! systemctl start "$name" >/dev/null 2>&1; then
+        _error "systemctl start ${name} 失败"
+        systemctl status "$name" --no-pager -l 2>&1 | tail -n 5 | sed 's/^/    /'
+      fi
+      ;;
+    openrc)
+      rc-service "$name" start >/dev/null 2>&1 || { _error "rc-service ${name} start 失败"; rc-service "$name" status 2>&1 | tail -n 3 | sed 's/^/    /'; }
+      ;;
     direct)
       case "$name" in
         ${SERVICE_NAME})
@@ -1718,7 +1726,10 @@ _add_argo_node() {
     _info "临时隧道域名将在启动后自动探测。"
   fi
   # 按需安装：本机没有任何 cloudflared 时才下载，已有则复用
-  _cloudflared_bin >/dev/null || install_cloudflared || return 1
+  if ! _cloudflared_bin >/dev/null; then
+    _info "本机没有 cloudflared，开始安装..."
+    install_cloudflared || { _error "cloudflared 安装失败，Argo 无法启动。"; return 1; }
+  fi
   # 删除旧的 argo 节点（一个隧道只挂一个 ws 节点）
   jq -r '.nodes[]? | select(.proto == "vless-ws" or .proto == "vmess-ws") | .tag' "$METADATA_FILE" | while read -r t; do _del_node_meta "$t"; done
   local node
@@ -1904,6 +1915,54 @@ _show_argo_overview() {
   fi
   echo -e "${CYAN}=============================================${NC}"
   echo "文件: ${SUB_DIR}/argo.txt"
+}
+
+# Argo 诊断: 一次把"为什么不起来"该看的都打出来, 不用来回猜
+_argo_doctor() {
+  local cfbin port
+  port=$(jq -r '.argo.port // 8888' "$METADATA_FILE" 2>/dev/null)
+  echo -e "${CYAN}================ Argo 诊断 ================${NC}"
+  echo "init: ${INIT_SYSTEM}   回源端口: ${port}"
+  if cfbin=$(_cloudflared_bin); then
+    echo "cloudflared: ${cfbin}"
+    echo "  $("$cfbin" --version 2>&1 | head -n1)"
+  else
+    _error "cloudflared: 未找到 (安装: 菜单 2 → 1 会自动装)"
+  fi
+  echo "metadata .argo:"
+  jq -c '.argo // {}' "$METADATA_FILE" 2>/dev/null | sed 's/^/    /'
+  echo "run-argo.sh:"
+  if [ -f "${MIHOMO_DIR}/run-argo.sh" ]; then
+    ls -l "${MIHOMO_DIR}/run-argo.sh" | awk '{print "    " $1, $NF}'
+    sed -n '1,6p' "${MIHOMO_DIR}/run-argo.sh" | sed 's/^/    /'
+  else
+    _error "    不存在 (说明还没成功生成过)"
+  fi
+  echo "systemd 单元:"
+  if [ -f "/etc/systemd/system/${ARGO_SERVICE_NAME}.service" ]; then
+    grep -E 'Type|ExecStart|Restart' "/etc/systemd/system/${ARGO_SERVICE_NAME}.service" | sed 's/^/    /'
+  else
+    _error "    未创建 (/etc/systemd/system/${ARGO_SERVICE_NAME}.service)"
+  fi
+  echo "服务状态:"
+  systemctl status "${ARGO_SERVICE_NAME}" --no-pager -l 2>&1 | head -n 8 | sed 's/^/    /'
+  echo "退出信息:"
+  systemctl show -p Result -p ExecMainStatus -p NRestarts "${ARGO_SERVICE_NAME}" 2>/dev/null | sed 's/^/    /'
+  echo "journal (最近 15 行, run-argo.sh 自身语法错会出现在这里):"
+  journalctl -u "${ARGO_SERVICE_NAME}" -n 15 --no-pager 2>/dev/null | sed 's/^/    /' || echo "    (无 journal)"
+  echo "日志 ${ARGO_LOG}:"
+  if [ -s "$ARGO_LOG" ]; then
+    tail -n 20 "$ARGO_LOG" | sed 's/^/    /'
+  else
+    _warn "    空或不存在 —— run-argo.sh 一次都没执行过"
+  fi
+  echo "端口监听:"
+  if ss -lntu 2>/dev/null | awk '{print $5}' | grep -qE "[:.]${port}([[:space:]]|$)"; then
+    ss -lntu 2>/dev/null | awk -v p=":$port" '$5 ~ p {print "    " $0}'
+  else
+    echo "    ${port} 未监听 (mihomo 核心没起或 listener 未生成)"
+  fi
+  echo -e "${CYAN}===========================================${NC}"
 }
 
 # 重新获取临时隧道（域名会变，链接随之更新）
@@ -2093,6 +2152,7 @@ _main_menu() {
         echo " 2) 删除 Argo 节点 / Argo 隧道"
         echo " 3) 修改 Argo 配置 (回源端口 / 隧道域名 / 连接 CF 的 IP 版本)"
         echo " 4) 查看 Argo 隧道与节点链接"
+        echo " 5) 诊断 (cloudflared / 单元 / 日志 / 端口 一次看全)"
         echo " 0) 返回"
         read -rp "Argo 管理: " a || break
         case "$a" in
@@ -2100,6 +2160,7 @@ _main_menu() {
           2) _delete_argo_menu ;;
           3) _modify_argo_menu ;;
           4) _show_argo_overview ;;
+          5) _argo_doctor ;;
           0) ;;
           *) _error "无效输入。" ;;
         esac

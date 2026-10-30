@@ -17,7 +17,7 @@
 umask 077
 export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin${PATH:+:$PATH}"
 
-SCRIPT_VERSION="1.5.14"
+SCRIPT_VERSION="1.5.15"
 MIHOMO_DIR="/etc/mihomo-lite"
 MIHOMO_BIN="/usr/local/bin/mihomo"
 CLOUDFLARED_BIN="/usr/local/bin/cloudflared"
@@ -260,6 +260,22 @@ _normalize_name() {
   [[ ${#s} -ge 2 && "$s" == \"*\" ]] && s="${s:1:${#s}-2}"
   [[ ${#s} -ge 2 && "$s" == \'*\' ]] && s="${s:1:${#s}-2}"
   printf '%s' "$s"
+}
+
+# Token 清洗: 粘贴常带 \r/换行/首尾空格/引号, 甚至整条命令; 脏字符会让 cloudflared 直接退出
+_clean_token() {
+  local t
+  t=$(printf '%s' "$1" | tr -d '\r\n')
+  t="${t#"${t%%[![:space:]]*}"}"
+  t="${t%"${t##*[![:space:]]}"}"
+  [[ ${#t} -ge 2 && "$t" == \"*\" ]] && t="${t:1:${#t}-2}"
+  [[ ${#t} -ge 2 && "$t" == \'*\' ]] && t="${t:1:${#t}-2}"
+  # 整条命令粘贴时取最后一个字段: cloudflared ... --token XXX / cloudflared service install XXX
+  case "$t" in
+    *[[:space:]]*) t=$(printf '%s' "$t" | awk '{print $NF}') ;;
+  esac
+  t=$(printf '%s' "$t" | tr -d '[:space:]')
+  printf '%s' "$t"
 }
 
 # 名称去重: 与已有节点重名时追加 -2/-3...; 结果写回 NODE_NAME
@@ -988,7 +1004,8 @@ _write_argo_runner() {
     4|6) edge_flag=" --edge-ip-version ${edge}" ;;
     *)   edge_flag="" ;;
   esac
-  local cfbin
+  local cfbin token_q
+  token_q=$(printf '%s' "$token" | sed "s/'/'\\\\''/g")   # 单引号转义, 防止 token 打断生成的脚本
   cfbin=$(_cloudflared_bin) || { _error "cloudflared 未安装。"; return 1; }
   {
     echo "#!/bin/bash"
@@ -998,7 +1015,7 @@ _write_argo_runner() {
     echo "for p in \$PROTO_LIST; do"
     echo "  echo \"[argo] 启动 cloudflared, 协议: \$p, 边缘 IP: ${edge}\""
     if [ "$mode" = "token" ]; then
-      echo "  ${cfbin} tunnel --no-autoupdate --protocol \"\$p\"\$EDGE_FLAG --token '${token}' &"
+      echo "  ${cfbin} tunnel --no-autoupdate --protocol \"\$p\"\$EDGE_FLAG --token '${token_q}' &"
     else
       echo "  ${cfbin} tunnel --no-autoupdate --protocol \"\$p\"\$EDGE_FLAG --url http://127.0.0.1:${port} &"
     fi
@@ -1017,20 +1034,37 @@ _write_argo_runner() {
 }
 
 # Argo 启动校验: cloudflared 起不来时把日志尾巴直接打出来, 别只留一句"没起来"
-_argo_start_check() {
+_argo_fail_hint() {
   local port="${1:-}"
-  sleep 3
-  if _service_active "$ARGO_SERVICE_NAME"; then
-    _success "cloudflared 已启动。"
-    return 0
-  fi
-  _error "cloudflared 没起来。最近日志:"
-  tail -n 15 "$ARGO_LOG" 2>/dev/null | sed 's/^/    /'
   echo "    排查:"
-  echo "      1) 菜单 9 看完整日志 (${ARGO_LOG})"
-  echo "      2) quic 走 UDP/7844, http2 走 TCP/7844 —— 机房封 UDP 就选 http2"
-  echo "      3) 面板 Public Hostname 的 URL 必须是 127.0.0.1:${port:-回源端口}, Type=HTTP"
-  echo "      4) 固定隧道 token 与域名必须属于同一个 Cloudflare 账号的同一个隧道"
+  echo "      1) 完整日志: ${ARGO_LOG}；systemctl status ${ARGO_SERVICE_NAME} --no-pager -l"
+  echo "      2) quic=UDP/7844, http2=TCP/7844 —— 机房封 UDP 就选 http2"
+  echo "      3) 面板 Public Hostname: Type=HTTP, URL=127.0.0.1:${port:-回源端口}"
+  if grep -qiE 'invalid tunnel secret|failed to (parse|decode) token|unauthorized|tunnel not found' "$ARGO_LOG" 2>/dev/null; then
+    echo "      → 命中 token 错误: 回面板重新复制 token, 粘贴时不要带空格/换行/引号"
+  fi
+  if grep -qiE 'context deadline|no recent network activity|i/o timeout|dial tcp|failed to dial' "$ARGO_LOG" 2>/dev/null; then
+    echo "      → 命中网络超时: 换协议(http2/quic)或检查 7844 出站是否被墙"
+  fi
+}
+
+_argo_start_check() {
+  local port="${1:-}" i
+  sleep 3
+  if ! _service_active "$ARGO_SERVICE_NAME"; then
+    _error "cloudflared 没起来。最近日志:"
+    tail -n 15 "$ARGO_LOG" 2>/dev/null | sed 's/^/    /'
+    _argo_fail_hint "$port"
+    return 1
+  fi
+  # 进程活着 != 隧道通了: 固定隧道要等 "Registered tunnel connection"
+  for i in $(seq 1 12); do
+    grep -q "Registered tunnel connection" "$ARGO_LOG" 2>/dev/null && { _success "cloudflared 已连上 CF 边缘。"; return 0; }
+    sleep 1
+  done
+  _warn "cloudflared 在跑，但 12 秒内没看到 'Registered tunnel connection'。最近日志:"
+  tail -n 12 "$ARGO_LOG" 2>/dev/null | sed 's/^/    /'
+  _argo_fail_hint "$port"
   return 1
 }
 
@@ -1716,7 +1750,13 @@ _add_argo_node() {
   _ask_node_name "$(_proto_label "$proto")"
   if [[ "$m" = "2" ]]; then
     read -rp "粘贴 Cloudflare Tunnel Token: " token
+    token=$(_clean_token "$token")
     [ -z "$token" ] && { _error "Token 不能为空。"; return 1; }
+    if ! printf '%s' "$token" | grep -qE '^[A-Za-z0-9_=.-]+$'; then
+      _error "Token 含非法字符(空格/引号/换行?)，请重新复制后粘贴。"
+      return 1
+    fi
+    _info "Token 长度 ${#token}，首尾 ${token:0:6}…${token: -6}"
     read -rp "固定隧道域名 (如 argo.example.com): " domain
     [ -z "$domain" ] && { _error "固定隧道必须填写域名。"; return 1; }
     mode="token"

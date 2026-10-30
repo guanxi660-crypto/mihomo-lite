@@ -1,6 +1,6 @@
 # mihomo-lite
 
-> 版本：v1.5.14
+> 版本：v1.5.15
 >
 > **⚠️ 测试阶段（BETA）**：本项目当前处于测试阶段，功能与配置格式可能随时调整，请勿在生产环境使用。
 
@@ -99,6 +99,12 @@ Argo 传输协议: 1) http2 (TCP, 默认最稳)  2) quic (UDP, 家宽/弱网常�
 ```
 
 选择结果写入 `metadata.json` 的 `argo.protocol`，`run-argo.sh` **先跑选定的协议**；20 秒内退出（常见：机房封 UDP 7844，quic 直接连不上）会自动换另一条协议并在日志里写明，不会一声不响地躺着。要严格只用选定协议：`ARGO_NO_FALLBACK=1`。
+
+### 固定隧道（Token）
+
+- 粘贴时会自动清洗 `\r`、首尾空格与引号，也接受整条命令（`cloudflared service install <token>`、`--token <token>`），只取最后一个字段
+- 添加后脚本会等日志出现 `Registered tunnel connection` 才算通；进程在跑但没连上，会直接把最近日志和命中原因打出来（token 错误 / 网络超时）
+- 面板侧必须配 Public Hostname：Type=HTTP，URL=`127.0.0.1:回源端口`，否则隧道通了也是 502
 
 环境变量仍可覆盖默认值（影响的是"当前默认值"，交互里手动选仍然优先）：
 

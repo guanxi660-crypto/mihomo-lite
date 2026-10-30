@@ -17,7 +17,7 @@
 umask 077
 export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin${PATH:+:$PATH}"
 
-SCRIPT_VERSION="1.5.7"
+SCRIPT_VERSION="1.5.8"
 MIHOMO_DIR="/etc/mihomo-lite"
 MIHOMO_BIN="/usr/local/bin/mihomo"
 CLOUDFLARED_BIN="/usr/local/bin/cloudflared"
@@ -1824,7 +1824,15 @@ _menu_status() {
   fi
   _service_active "$SERVICE_NAME" && _success "mihomo 核心运行中" || _warn "mihomo 核心未运行"
   if jq -e '.argo.enabled == true' "$METADATA_FILE" >/dev/null 2>&1; then
-    _service_active "$ARGO_SERVICE_NAME" && _success "Argo 隧道运行中 (默认 http2, 失败回退 quic)" || _warn "Argo 隧道未运行"
+    local aproto aedge
+    aproto=$(jq -r '.argo.protocol // "http2→quic 回退"' "$METADATA_FILE")
+    aedge=$(jq -r '.argo.edge_ip // "auto"' "$METADATA_FILE")
+    if _service_active "$ARGO_SERVICE_NAME"; then
+      _success "Argo 隧道运行中 (协议 ${aproto} / 边缘 IP ${aedge})"
+    else
+      _warn "Argo 隧道未运行 (协议 ${aproto} / 边缘 IP ${aedge})"
+      echo "        菜单 6 重启；仍失败看菜单 9 日志，或菜单 2→3 检查端口/域名"
+    fi
     local d; d=$(jq -r '.argo.domain // ""' "$METADATA_FILE")
     [ -n "$d" ] && echo "Argo 域名: ${d}"
   fi
@@ -1836,7 +1844,7 @@ _show_menu() {
   echo ""
   echo -e "${GREEN}======== mihomo-lite 管理脚本 v${SCRIPT_VERSION} ========${NC}"
   echo " 1. 添加节点 (XHTTP-Reality/Reality/HY2/TUIC/AnyTLS/Mieru/SS2022/Trojan)"
-  echo " 2. Argo 隧道管理 (添加/删除节点与隧道, 默认http2失败回退QUIC)"
+  echo " 2. Argo 隧道管理 (添加/删除/修改节点与隧道, 传输协议 http2/quic 可选)"
   echo " 3. 查看节点链接"
   echo " 4. 删除节点"
   echo " 5. 修改节点"

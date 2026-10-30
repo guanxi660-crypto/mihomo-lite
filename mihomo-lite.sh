@@ -17,7 +17,7 @@
 umask 077
 export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin${PATH:+:$PATH}"
 
-SCRIPT_VERSION="1.5.11"
+SCRIPT_VERSION="1.5.12"
 MIHOMO_DIR="/etc/mihomo-lite"
 MIHOMO_BIN="/usr/local/bin/mihomo"
 CLOUDFLARED_BIN="/usr/local/bin/cloudflared"
@@ -223,6 +223,7 @@ _geo_node_name() {
     isp="ISP"
   else
     isp="${isp%%(*}"                                                   # 砍掉括号补充说明
+    isp="${isp%% *}"                                                   # 空格后截断: 只保留第一个词, 否则点分结构会被空格打断
     isp=$(printf '%s' "$isp" | sed 's/^[[:space:]]*//; s/[[:space:]]*$//')
     # 按字符(非字节)截断到 16, 避免把中文运营商名切半产生非法 UTF-8
     cut=$(printf '%s' "$isp" | jq -Rr '.[0:16]' 2>/dev/null)
@@ -244,8 +245,8 @@ _proto_label() {
     mieru)          echo "Mieru" ;;
     ss2022)         echo "SS2022" ;;
     trojan-reality) echo "Trojan.Reality" ;;
-    vless-ws)       echo "Argo.Vless.ws.tls" ;;
-    vmess-ws)       echo "Argo.Vmess.ws.tls" ;;
+    vless-ws)       echo "Argo" ;;
+    vmess-ws)       echo "Argo" ;;
     *)              echo "$1" ;;
   esac
 }
@@ -327,17 +328,25 @@ _gen_selfsigned_cert() {
 _migrate_node_names() {
   [ -s "$METADATA_FILE" ] || return 0
   local n
-  n=$(jq -r '[.nodes[]? | select((.name // "") | test("-HY2$|-TUIC$|-AnyTLS$|-Mieru$|-SS2022$|-VLESS-XHTTP$|-VLESS-Reality$|-Trojan-Reality$|-Argo-vless-ws$|-Argo-vmess-ws$|-Argo-VLESS-WS$|-Argo-VMESS-WS$|-[A-Za-z0-9.]+-[0-9]+$"))] | length' "$METADATA_FILE" 2>/dev/null)
+  n=$(jq -r '[.nodes[]? | select((.name // "") | test("-HY2$|-TUIC$|-AnyTLS$|-Mieru$|-SS2022$|-VLESS-XHTTP$|-VLESS-Reality$|-Trojan-Reality$|-Argo-vless-ws$|-Argo-vmess-ws$|-Argo-VLESS-WS$|-Argo-VMESS-WS$|\\.Argo\\.Vless\\.ws\\.tls$|\\.Argo\\.Vmess\\.ws\\.tls$|-[A-Za-z0-9.]+-[0-9]+$| "))] | length' "$METADATA_FILE" 2>/dev/null)
   [ "${n:-0}" -gt 0 ] 2>/dev/null || return 0
   local tmp="${METADATA_FILE}.tmp"
   if jq '
+      def fix_isp:
+        split(".") as $p
+        | if (($p | length) >= 2) and ((($p[1] // "") | test(" ")))
+          then ($p[0] + "." + ((($p[1] | split(" "))[0]))
+                + (if ($p | length) > 2 then "." + ($p[2:] | join(".")) else "" end))
+          else . end;
       def newname:
         (sub("-[0-9]+$"; "")) as $base
         | ($base
-            | sub("-Argo-vless-ws$"; ".Argo.Vless.ws.tls")
-            | sub("-Argo-VMESS-WS$"; ".Argo.Vmess.ws.tls")
-            | sub("-Argo-vmess-ws$"; ".Argo.Vmess.ws.tls")
-            | sub("-Argo-VLESS-WS$"; ".Argo.Vless.ws.tls")
+            | sub("-Argo-vless-ws$"; ".Argo")
+            | sub("-Argo-vmess-ws$"; ".Argo")
+            | sub("-Argo-VLESS-WS$"; ".Argo")
+            | sub("-Argo-VMESS-WS$"; ".Argo")
+            | sub("\\.Argo\\.Vless\\.ws\\.tls$"; ".Argo")
+            | sub("\\.Argo\\.Vmess\\.ws\\.tls$"; ".Argo")
             | sub("-VLESS-XHTTP$"; ".Vless.xhttp.reality")
             | sub("-VLESS-Reality$"; ".Reality")
             | sub("-Trojan-Reality$"; ".Trojan.Reality")
@@ -346,8 +355,10 @@ _migrate_node_names() {
             | sub("-AnyTLS$"; ".AnyTls")
             | sub("-Mieru$"; ".Mieru")
             | sub("-SS2022$"; ".SS2022")) as $conv
-        | if $conv == $base then .
-          else ($conv | sub("^(?<cc>[A-Za-z]{2})-"; "\(.cc).")) end;
+        | if $conv == $base
+          then (if test("\\.(Hy2|Tuic|Reality|AnyTls|Mieru|SS2022|Argo|Trojan\\.Reality|Vless\\.xhttp\\.reality)$") then fix_isp else . end)
+          else (($conv | sub("^(?<cc>[A-Za-z]{2})-"; "\(.cc).")) | fix_isp)
+          end;
       .nodes |= (reduce .[] as $n ({seen:{}, out:[]};
           ($n.name // "") as $raw
           | (if $raw == "" then "" else ($raw | newname) end) as $nm
@@ -1740,7 +1751,7 @@ _modify_argo_menu() {
 
   # 0) 节点名称(Argo 节点不在【节点修改】列表里, 改名只能在这里)
   new_name="$cur_name"
-  read -rp "节点名称 [${cur_name:-地区.运营商.Argo.Vless.ws.tls}]: " v || v=""
+  read -rp "节点名称 [${cur_name:-地区.运营商.Argo}]: " v || v=""
   v=$(_normalize_name "$v")
   [ -n "$v" ] && new_name="$v"
   if [ -n "$new_name" ] && [ "$new_name" != "$cur_name" ]; then

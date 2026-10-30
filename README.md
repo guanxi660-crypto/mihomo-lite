@@ -1,6 +1,6 @@
 # mihomo-lite
 
-> 版本：v1.5.11
+> 版本：v1.5.12
 >
 > **⚠️ 测试阶段（BETA）**：本项目当前处于测试阶段，功能与配置格式可能随时调整，请勿在生产环境使用。
 
@@ -38,7 +38,7 @@ mihomo 内核多协议服务端一键管理脚本，交互风格参考 [singbox-
 
 - 中文交互菜单：添加 / 删除 / **修改**节点、查看链接、重启 / 停止、状态、日志、卸载（Argo 节点不在节点修改列表里，统一走 **Argo 管理 → 3 修改**）
 - 8 种协议：XHTTP+Reality（首选）/ Reality+Vision / Hysteria2 / TUIC v5 / AnyTLS / Mieru / SS2022 / Trojan-Reality
-- 节点默认命名「地区.运营商.协议[.传输][.安全]」（点分隔、不带端口），可自定义覆盖；重名自动追加 `.2`/`.3`（客户端 proxies 不允许同名）
+- 节点默认命名「地区.运营商.协议」（点分隔、不带端口），可自定义覆盖；重名自动追加 `.2`/`.3`（客户端 proxies 不允许同名）
 - 修改节点时 Mieru 可在 **TCP / UDP** 之间在线切换，改完自动重建配置并重启
 - 对外端口默认随机空闲端口（避免撞车），Argo 回源端口默认 8888（仅监听 127.0.0.1，可在 Argo 管理里改）
 - 节点可选对外 **IPv4 / IPv6**：双栈机器添加时选择、单栈机器自动采用，纯 IPv6 机器自动以 `::` 监听（Argo 节点例外：对外走 Cloudflare 域名，添加时问的是 cloudflared 传输协议）
@@ -63,13 +63,14 @@ mihomo 内核多协议服务端一键管理脚本，交互风格参考 [singbox-
 | AnyTLS | `SG.Dromatics.AnyTls` |
 | Mieru | `SG.Dromatics.Mieru` |
 | Shadowsocks 2022 | `SG.Dromatics.SS2022` |
-| Argo + VLESS/WS | `SG.Dromatics.Argo.Vless.ws.tls` |
-| Argo + VMess/WS | `SG.Dromatics.Argo.Vmess.ws.tls` |
+| Argo + VLESS/WS | `SG.Dromatics.Argo` |
+| Argo + VMess/WS | `SG.Dromatics.Argo` |
 
 规则细节：
 
 - 只有简称的协议（Hy2 / Tuic / Reality）只保留简称，首字母大写，不追加传输与安全段
-- 隧道类带 `Argo.协议.传输.安全` 四段，和普通节点一眼区分
+- Argo 节点只留 `Argo` 一段，不追加协议/传输/安全（VLESS 还是 VMess 看节点本身，名字里不重复）
+- 运营商名按**空格截断**，只取第一个词：`Dromatics System` → `Dromatics`
 - 重名自动追加 `.2`、`.3`；旧版 `地区-运营商-协议-端口` 形式的历史节点会在启动时一次性迁移为点分风格，手改过的自定义名原样保留
 
 ## SNI 伪装域名
@@ -130,7 +131,7 @@ Argo 节点不在「节点修改」列表里，也常常在「查看节点链接
 
 固定隧道添加时会把 Public Hostname 写进节点的 `argo_domain`；旧数据缺这个字段时，链接生成会自动回退用隧道全局域名，不会再出现「节点在、链接不在」。
 
-节点命名与其它协议同一套规则：**地区.运营商.协议[.传输][.安全]**，用 `.` 分隔、不带端口。例如 `SG.Dromatics.Argo.Vless.ws.tls`。分享链接里不再加 `arg-` 前缀。要改名走【Argo 管理 → 3 修改】。
+节点命名与其它协议同一套规则：**地区.运营商.协议**，用 `.` 分隔、不带端口，Argo 节点只留 `Argo` 一段。例如 `SG.Dromatics.Argo`。分享链接里不再加 `arg-` 前缀。要改名走【Argo 管理 → 3 修改】。
 
 ## 关于订阅
 

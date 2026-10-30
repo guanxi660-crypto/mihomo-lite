@@ -17,7 +17,7 @@
 umask 077
 export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin${PATH:+:$PATH}"
 
-SCRIPT_VERSION="1.5.6"
+SCRIPT_VERSION="1.5.7"
 MIHOMO_DIR="/etc/mihomo-lite"
 MIHOMO_BIN="/usr/local/bin/mihomo"
 CLOUDFLARED_BIN="/usr/local/bin/cloudflared"
@@ -1777,8 +1777,18 @@ _update_script() {
   mv -f "$tmp" "$target"
   if [ -n "$new_ver" ] && [ "$new_ver" = "$cur_ver" ]; then
     _warn "远端版本仍是 v${new_ver}，已按最新内容覆盖 ${target}（若刚发版请等 1-2 分钟后重试）。"
+    _info "重新运行 mh 生效。"
   else
-    _success "脚本已更新: v${cur_ver} → v${new_ver:-未知}，重新运行 mh 生效。"
+    _success "脚本已更新: v${cur_ver} → v${new_ver:-未知}，正在重载新版本…"
+    # 文件已被替换, 但当前进程内存里跑的还是旧代码(旧函数/旧 SCRIPT_VERSION),
+    # 不 exec 就得退出重进才看得到新版本号。这里直接用新脚本替换当前进程。
+    if [ -x "$target" ]; then
+      exec "$target"
+    elif [ -f "$target" ]; then
+      exec bash "$target"
+    else
+      _warn "目标不可执行，无法自动重载，请手动重新运行 mh。"
+    fi
   fi
 }
 

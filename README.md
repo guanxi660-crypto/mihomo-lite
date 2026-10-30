@@ -1,6 +1,6 @@
 # mihomo-lite
 
-> 版本：v1.5.6
+> 版本：v1.5.7
 >
 > **⚠️ 测试阶段（BETA）**：本项目当前处于测试阶段，功能与配置格式可能随时调整，请勿在生产环境使用。
 
@@ -18,7 +18,7 @@ mihomo 内核多协议服务端一键管理脚本，交互风格参考 [singbox-
 (curl -LfsS https://gh-proxy.com/https://raw.githubusercontent.com/guanxi660-crypto/mihomo-lite/main/mihomo-lite.sh -o /usr/local/bin/mh || wget -q https://gh-proxy.com/https://raw.githubusercontent.com/guanxi660-crypto/mihomo-lite/main/mihomo-lite.sh -O /usr/local/bin/mh) && chmod +x /usr/local/bin/mh && mh
 ```
 
-安装后随时以 root 运行 `mh` 进入管理菜单；脚本自身的更新用菜单 **【12 更新脚本】**。核心下载失败时可用 `GH_PROXY=镜像前缀 mh` 重试（如 `GH_PROXY=https://ghfast.top/ mh`）。
+安装后随时以 root 运行 `mh` 进入管理菜单；脚本自身的更新用菜单 **【12 更新脚本】**，更新完成后会自动 `exec` 重载新版本（菜单标题的版本号立刻变，不用退出重进）。核心下载失败时可用 `GH_PROXY=镜像前缀 mh` 重试（如 `GH_PROXY=https://ghfast.top/ mh`）。
 
 ## 支持协议（mihomo listeners 服务端入站，字段已按官方 wiki 核实）
 

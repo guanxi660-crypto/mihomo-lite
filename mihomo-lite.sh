@@ -17,7 +17,7 @@
 umask 077
 export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin${PATH:+:$PATH}"
 
-SCRIPT_VERSION="1.5.20"
+SCRIPT_VERSION="1.5.21"
 MIHOMO_DIR="/etc/mihomo-lite"
 MIHOMO_BIN="/usr/local/bin/mihomo"
 CLOUDFLARED_BIN="/usr/local/bin/cloudflared"
@@ -879,6 +879,21 @@ _fetch_gh() {
   rm -f "$out"
   _fetch "${mirror}${url}" "$out" 2>/dev/null
   gzip -t "$out" 2>/dev/null
+}
+
+# 确保 mihomo 核心已安装(任何"要写 listener"的操作前调用)
+# 未安装时当场询问是否安装; 拒绝或安装失败返回非 0, 由调用方中止流程
+_ensure_core() {
+  [ -x "$MIHOMO_BIN" ] && return 0
+  _warn "检测到 mihomo 核心未安装。"
+  local ic
+  read -rp "是否现在安装 mihomo 核心? [Y/n]: " ic || ic=""
+  if [[ ! "$ic" =~ ^[Nn]$ ]]; then
+    install_core || { _error "核心安装失败，请检查网络后重试。"; return 1; }
+    return 0
+  fi
+  _error "未安装核心，无法生成监听配置；已取消本次操作。"
+  return 1
 }
 
 install_core() {
@@ -1759,6 +1774,7 @@ _delete_argo_tunnel() {
 }
 
 _add_argo_node() {
+  _ensure_core || return 1
   # ── 已有隧道检测（两层）────────────────────────────────
   # 第一层：本脚本管理的隧道（metadata.argo）
   local existing_mode existing_domain existing_port
@@ -1910,6 +1926,7 @@ _probe_temp_domain() {
 # 可改: 回源监听端口(WS 端口, 隧道指向同步)、隧道域名、连接 CF 边缘的 IP 版本(4/6/auto)
 # Argo 节点与隧道是一体的, 所以这部分从【节点修改】里移出来单独放这里
 _modify_argo_menu() {
+  _ensure_core || return 1
   if [ "$(jq -r '.argo.enabled // false' "$METADATA_FILE")" != "true" ]; then
     _warn "尚未配置 Argo 隧道，请先在【Argo 管理 → 1 添加】里创建。"
     return 1
@@ -2281,15 +2298,7 @@ _main_menu() {
     case "$choice" in
       1)
         # 添加节点前检查核心是否已安装，未安装可当场确认安装
-        if [ ! -x "$MIHOMO_BIN" ]; then
-          _warn "检测到 mihomo 核心未安装。"
-          read -rp "是否现在安装 mihomo 核心? [Y/n]: " ic
-          if [[ ! "$ic" =~ ^[Nn]$ ]]; then
-            install_core || { _error "核心安装失败，请检查网络后重试。"; continue; }
-          else
-            _warn "未安装核心，节点添加后将无法运行。"
-          fi
-        fi
+        _ensure_core || continue
         echo " 1) VLESS+XHTTP+Reality  【推荐·首选】"
         echo " 2) VLESS+Reality+Vision (TCP)"
         echo " 3) Hysteria2"

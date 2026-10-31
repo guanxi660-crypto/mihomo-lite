@@ -17,7 +17,7 @@
 umask 077
 export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin${PATH:+:$PATH}"
 
-SCRIPT_VERSION="1.5.16"
+SCRIPT_VERSION="1.5.17"
 MIHOMO_DIR="/etc/mihomo-lite"
 MIHOMO_BIN="/usr/local/bin/mihomo"
 CLOUDFLARED_BIN="/usr/local/bin/cloudflared"
@@ -710,11 +710,13 @@ _build_links() {
         [ -z "$domain" ] && domain=$(jq -r '.argo.domain // ""' "$METADATA_FILE" 2>/dev/null)
         [ -z "$domain" ] && continue
         if [ "$proto" = "vless-ws" ]; then
-          link="vless://${uuid}@${domain}:443?encryption=none&security=tls&type=ws&host=${domain}&path=$(_url_encode "$path")#${enc_name}"
+          # sni 显式写成隧道域名: CF 边缘的证书就是这个域, 有的客户端(旧 v2rayN/部分安卓内核)
+          # 不会从 host 推导 TLS 的 server_name, 缺 sni 会握手失败或落到证书不匹配
+          link="vless://${uuid}@${domain}:443?encryption=none&security=tls&sni=${domain}&host=${domain}&type=ws&path=$(_url_encode "$path")#${enc_name}"
           printf '  - name: "%s"\n    type: vless\n    server: "%s"\n    port: 443\n    uuid: %s\n    udp: true\n    tls: true\n    servername: %s\n    network: ws\n    ws-opts:\n      path: "%s"\n      headers:\n        Host: %s\n' "$tag" "$domain" "$uuid" "$domain" "$path" "$domain" >> "$yaml_file"
         else
           local vj
-          vj=$(jq -cn --arg v "2" --arg u "$uuid" --arg d "$domain" --arg t "$tag" --arg p "$path" '{v:$v,ps:$t,add:$d,port:"443",id:$u,aid:"0",scy:"auto",net:"ws",type:"none",host:$d,path:$p,tls:"tls"}')
+          vj=$(jq -cn --arg v "2" --arg u "$uuid" --arg d "$domain" --arg t "$tag" --arg p "$path" '{v:$v,ps:$t,add:$d,port:"443",id:$u,aid:"0",scy:"auto",net:"ws",type:"none",host:$d,path:$p,tls:"tls",sni:$d}')
           link="vmess://$(_b64_nopad "$vj")"
           printf '  - name: "%s"\n    type: vmess\n    server: "%s"\n    port: 443\n    uuid: %s\n    alterId: 0\n    cipher: auto\n    udp: true\n    tls: true\n    servername: %s\n    network: ws\n    ws-opts:\n      path: "%s"\n      headers:\n        Host: %s\n' "$tag" "$domain" "$uuid" "$domain" "$path" "$domain" >> "$yaml_file"
         fi

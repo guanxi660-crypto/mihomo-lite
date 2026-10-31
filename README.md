@@ -1,6 +1,6 @@
 # mihomo-lite
 
-> 版本：v1.5.16
+> 版本：v1.5.17
 >
 > **⚠️ 测试阶段（BETA）**：本项目当前处于测试阶段，功能与配置格式可能随时调整，请勿在生产环境使用。
 
@@ -136,6 +136,14 @@ Argo 节点不在「节点修改」列表里，也常常在「查看节点链接
 - 隧道信息：模式 / 回源端口 / 域名 / 传输协议 / 边缘 IP / cloudflared 运行状态
 - 节点列表：每个 WS 节点的协议、回源地址、绑定的域名
 - Argo 节点链接：同时落盘到 `sub/argo.txt`（`links.txt` 里也保留全量）
+
+Argo 的 TLS 由 Cloudflare 边缘终结，证书就是隧道域名本身，所以：
+
+| 位置 | SNI 怎么来 |
+|---|---|
+| 服务端 listener | 不配。`cloudflared` 回源是明文 HTTP 打到 `127.0.0.1:端口`，本机不做 TLS |
+| 客户端链接 | 显式写 `sni=隧道域名`（VLESS 的 `&sni=`、VMess JSON 的 `sni` 字段）。CF 边缘证书即该域名；部分客户端不会从 `host` 推导 TLS server_name，缺 `sni` 会握手失败或证书不匹配 |
+| clash.yaml | `servername: 隧道域名`，与链接里的 `sni` 一致 |
 
 固定隧道添加时会把 Public Hostname 写进节点的 `argo_domain`；旧数据缺这个字段时，链接生成会自动回退用隧道全局域名，不会再出现「节点在、链接不在」。
 

@@ -1,6 +1,6 @@
 # mihomo-lite
 
-> 版本：v1.5.22
+> 版本：v1.5.23
 >
 > **⚠️ 测试阶段（BETA）**：本项目当前处于测试阶段，功能与配置格式可能随时调整，请勿在生产环境使用。
 
@@ -46,6 +46,7 @@ mihomo 内核多协议服务端一键管理脚本，交互风格参考 [singbox-
 - 节点可选对外 **IPv4 / IPv6**：双栈机器添加时选择、单栈机器自动采用，纯 IPv6 机器自动以 `::` 监听（Argo 节点例外：对外走 Cloudflare 域名，添加时问的是 cloudflared 传输协议）
 - 按 CPU 能力选择内核（x86-64-v3 优化版 / compatible 兼容版），老 CPU 可正常运行
 - 复用本机已有 cloudflared，不覆盖、不破坏原有 Cloudflare 部署
+- 临时隧道（trycloudflare）每次重启域名都会变：脚本重启后自动把新域名同步回节点与订阅，无需手动点【10】
 - 分享链接输出（`/etc/mihomo-lite/sub/links.txt`，Argo 节点另存 `sub/argo.txt`）+ Clash/Mihomo 客户端配置（`sub/clash.yaml`）
 - 支持 systemd / OpenRC / 无 init 直跑三种模式
 - 重启前 `mihomo -t` 配置校验 + 启动后存活兜底检查

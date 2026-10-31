@@ -17,7 +17,7 @@
 umask 077
 export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin${PATH:+:$PATH}"
 
-SCRIPT_VERSION="1.5.22"
+SCRIPT_VERSION="1.5.23"
 MIHOMO_DIR="/etc/mihomo-lite"
 MIHOMO_BIN="/usr/local/bin/mihomo"
 CLOUDFLARED_BIN="/usr/local/bin/cloudflared"
@@ -1201,6 +1201,28 @@ _service_active() {
   esac
 }
 
+# 临时隧道(trycloudflare)每次启动都会分配新域名: 重启 Argo 后把新域名同步回
+# metadata 与订阅(links/clash.yaml), 否则旧域名的节点会全部失效
+_sync_temp_argo_domain() {
+  local mark="${1:-0}"
+  [ "$(jq -r '.argo.mode // ""' "$METADATA_FILE" 2>/dev/null)" = "temp" ] || return 0
+  local old d i
+  old=$(jq -r '.argo.domain // ""' "$METADATA_FILE")
+  for i in $(seq 1 20); do
+    d=$(tail -n +$((mark+1)) "$ARGO_LOG" 2>/dev/null | grep -oE 'https://[a-z0-9-]+\.trycloudflare\.com' | tail -n1 | sed 's|https://||')
+    [ -n "$d" ] && [ "$d" != "$old" ] && break
+    sleep 1
+  done
+  if [ -n "$d" ] && [ "$d" != "$old" ]; then
+    jq --arg d "$d" '.argo.domain = $d
+      | .nodes |= map(if (.proto == "vless-ws" or .proto == "vmess-ws") then .argo_domain = $d else . end)'       "$METADATA_FILE" > "${METADATA_FILE}.tmp" && mv "${METADATA_FILE}.tmp" "$METADATA_FILE"
+    _warn "临时隧道域名已变更: ${old:-无} → ${d}（已同步节点与订阅）"
+    _build_links >/dev/null 2>&1
+  fi
+  return 0
+}
+
+
 _restart_all() {
   # 配置校验不通过则不重启
   if [ -x "$MIHOMO_BIN" ] && [ -s "$CONFIG_FILE" ]; then
@@ -1212,6 +1234,8 @@ _restart_all() {
   fi
   _stop_service "$SERVICE_NAME"; _start_service "$SERVICE_NAME"
   if jq -e '.argo.enabled == true' "$METADATA_FILE" >/dev/null 2>&1; then
+    local argo_mark=0
+    [ -f "$ARGO_LOG" ] && argo_mark=$(wc -l < "$ARGO_LOG" 2>/dev/null || echo 0)
     _stop_service "$ARGO_SERVICE_NAME"; _start_service "$ARGO_SERVICE_NAME"
   fi
   # 启动后存活校验：mihomo -t 查不出 psk 之类的运行期 listen 错误，用进程状态兜底
@@ -1221,6 +1245,7 @@ _restart_all() {
     [ "$INIT_SYSTEM" = "systemd" ] && journalctl -u ${SERVICE_NAME} -n 3 --no-pager | grep -i error || tail -n 3 "${CORE_LOG}"
     return 1
   fi
+  _sync_temp_argo_domain "${argo_mark:-0}"
   _success "服务已重启。"
 }
 
@@ -1915,7 +1940,7 @@ _probe_temp_domain() {
   _info "等待 Argo 临时隧道域名发布 (最长 30s)..."
   local domain=""
   for i in $(seq 1 30); do
-    domain=$(grep -oE 'https://[a-z0-9-]+\.trycloudflare\.com' "$ARGO_LOG" 2>/dev/null | tail -n1 | sed 's|https://||')
+    d=$(grep -oE 'https://[a-z0-9-]+\.trycloudflare\.com' "$ARGO_LOG" 2>/dev/null | tail -n1 | sed 's|https://||')
     [ -n "$domain" ] && break
     sleep 1
   done

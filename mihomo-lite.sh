@@ -17,7 +17,7 @@
 umask 077
 export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin${PATH:+:$PATH}"
 
-SCRIPT_VERSION="1.5.15"
+SCRIPT_VERSION="1.5.16"
 MIHOMO_DIR="/etc/mihomo-lite"
 MIHOMO_BIN="/usr/local/bin/mihomo"
 CLOUDFLARED_BIN="/usr/local/bin/cloudflared"
@@ -1007,6 +1007,10 @@ _write_argo_runner() {
   local cfbin token_q
   token_q=$(printf '%s' "$token" | sed "s/'/'\\\\''/g")   # 单引号转义, 防止 token 打断生成的脚本
   cfbin=$(_cloudflared_bin) || { _error "cloudflared 未安装。"; return 1; }
+  if [ "$mode" = "token" ] && [ -z "$token" ]; then
+    _error "固定隧道 token 为空, 无法启动。"
+    return 1
+  fi
   {
     echo "#!/bin/bash"
     echo "exec > >(tee -a '${ARGO_LOG}') 2>&1"
@@ -1015,7 +1019,10 @@ _write_argo_runner() {
     echo "for p in \$PROTO_LIST; do"
     echo "  echo \"[argo] 启动 cloudflared, 协议: \$p, 边缘 IP: ${edge}\""
     if [ "$mode" = "token" ]; then
-      echo "  ${cfbin} tunnel --no-autoupdate --protocol \"\$p\"\$EDGE_FLAG --token '${token_q}' &"
+      # 固定隧道必须走 run 子命令: cloudflared tunnel 本身没有 --token 这个 flag,
+      # 直接 tunnel --token 会被当成非法参数、只打印帮助就退出(日志里就是一大段 --help)。
+      # 而临时隧道的 --url 是 tunnel 命令自带的简写, 所以临时能起、固定起不来。
+      echo "  ${cfbin} tunnel --no-autoupdate run --protocol \"\$p\" \$EDGE_FLAG --token '${token_q}' &"
     else
       echo "  ${cfbin} tunnel --no-autoupdate --protocol \"\$p\"\$EDGE_FLAG --url http://127.0.0.1:${port} &"
     fi
@@ -1042,6 +1049,11 @@ _argo_fail_hint() {
   echo "      3) 面板 Public Hostname: Type=HTTP, URL=127.0.0.1:${port:-回源端口}"
   if grep -qiE 'invalid tunnel secret|failed to (parse|decode) token|unauthorized|tunnel not found' "$ARGO_LOG" 2>/dev/null; then
     echo "      → 命中 token 错误: 回面板重新复制 token, 粘贴时不要带空格/换行/引号"
+  fi
+  if grep -qiE 'show help|^NAME:|^USAGE:|flag provided but not defined|incorrect Usage' "$ARGO_LOG" 2>/dev/null; then
+    echo "      → 命中命令被拒(日志里是 cloudflared 的帮助文本): 说明启动参数不对, 不是网络问题"
+    echo "      → 固定隧道正确写法是 'cloudflared tunnel --no-autoupdate --protocol http2 run --token <token>'"
+    echo "      → 手工验证: /etc/mihomo-lite/run-argo.sh 直接 bash 跑一次看输出"
   fi
   if grep -qiE 'context deadline|no recent network activity|i/o timeout|dial tcp|failed to dial' "$ARGO_LOG" 2>/dev/null; then
     echo "      → 命中网络超时: 换协议(http2/quic)或检查 7844 出站是否被墙"
@@ -1970,11 +1982,14 @@ _argo_doctor() {
     _error "cloudflared: 未找到 (安装: 菜单 2 → 1 会自动装)"
   fi
   echo "metadata .argo:"
-  jq -c '.argo // {}' "$METADATA_FILE" 2>/dev/null | sed 's/^/    /'
+  jq -c '.argo // {}
+         | if (.token // "") != ""
+           then .token = ((.token[0:6]) + "…" + (.token[-6:]) + " (len " + ((.token | length) | tostring) + ")")
+           else . end' "$METADATA_FILE" 2>/dev/null | sed 's/^/    /'
   echo "run-argo.sh:"
   if [ -f "${MIHOMO_DIR}/run-argo.sh" ]; then
     ls -l "${MIHOMO_DIR}/run-argo.sh" | awk '{print "    " $1, $NF}'
-    sed -n '1,6p' "${MIHOMO_DIR}/run-argo.sh" | sed 's/^/    /'
+    sed -n '1,8p' "${MIHOMO_DIR}/run-argo.sh" | sed 's/--token .*/--token ****/' | sed 's/^/    /'
   else
     _error "    不存在 (说明还没成功生成过)"
   fi
@@ -2231,12 +2246,22 @@ main() {
   mkdir -p "$MIHOMO_DIR" "$SUB_DIR" "$CERTS_DIR"
   # 生成直跑模式的 argo 启动脚本（若已有 argo 配置）
   if jq -e '.argo.enabled == true' "$METADATA_FILE" >/dev/null 2>&1; then
-    local mode token port
+    local mode token port runner bak
     mode=$(jq -r '.argo.mode // "temp"' "$METADATA_FILE")
     token=$(jq -r '.argo.token // ""' "$METADATA_FILE")
     port=$(jq -r '.argo.port // 8888' "$METADATA_FILE")
     [ "$mode" = "temp" ] && token=""
+    runner="${MIHOMO_DIR}/run-argo.sh"
+    bak=""
+    [ -f "$runner" ] && { bak=$(mktemp); cp -f "$runner" "$bak" 2>/dev/null; }
     _write_argo_runner "$mode" "$token" "$port"
+    # 脚本升级后启动命令可能变了(如固定隧道改用 run 子命令), 内容有变就重启一次 argo 服务
+    if [ -n "$bak" ] && ! cmp -s "$bak" "$runner" && _service_active "$ARGO_SERVICE_NAME"; then
+      _stop_service "$ARGO_SERVICE_NAME"
+      _start_service "$ARGO_SERVICE_NAME" >/dev/null 2>&1 \
+        && _info "Argo 启动脚本已更新，服务已按新参数重启"
+    fi
+    [ -n "$bak" ] && rm -f "$bak"
   fi
   if [ -x "$MIHOMO_BIN" ] && [ ! -s "$CONFIG_FILE" ]; then
     _regen_config

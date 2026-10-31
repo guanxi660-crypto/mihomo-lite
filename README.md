@@ -1,6 +1,6 @@
 # mihomo-lite
 
-> 版本：v1.5.15
+> 版本：v1.5.16
 >
 > **⚠️ 测试阶段（BETA）**：本项目当前处于测试阶段，功能与配置格式可能随时调整，请勿在生产环境使用。
 
@@ -103,8 +103,10 @@ Argo 传输协议: 1) http2 (TCP, 默认最稳)  2) quic (UDP, 家宽/弱网常�
 ### 固定隧道（Token）
 
 - 粘贴时会自动清洗 `\r`、首尾空格与引号，也接受整条命令（`cloudflared service install <token>`、`--token <token>`），只取最后一个字段
-- 添加后脚本会等日志出现 `Registered tunnel connection` 才算通；进程在跑但没连上，会直接把最近日志和命中原因打出来（token 错误 / 网络超时）
+- 启动命令走 `run` 子命令：`cloudflared tunnel --no-autoupdate run --protocol http2 --token <token>`。`--token` 不是 `cloudflared tunnel` 本身的 flag，写在 `tunnel` 后面会被当成非法参数、只打印帮助就退出（日志里会是一大段 `--help`）；临时隧道能用是因为 `--url` 是 `tunnel` 自带的简写
+- 添加后脚本会等日志出现 `Registered tunnel connection` 才算通；进程在跑但没连上，会直接把最近日志和命中原因打出来（token 错误 / 网络超时 / 命令被拒）
 - 面板侧必须配 Public Hostname：Type=HTTP，URL=`127.0.0.1:回源端口`，否则隧道通了也是 502
+- 升级脚本后 `run-argo.sh` 会按新命令重建；内容有变且服务在跑时自动重启一次 Argo 服务，不用手工重加节点
 
 环境变量仍可覆盖默认值（影响的是"当前默认值"，交互里手动选仍然优先）：
 

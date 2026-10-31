@@ -17,7 +17,7 @@
 umask 077
 export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin${PATH:+:$PATH}"
 
-SCRIPT_VERSION="1.5.21"
+SCRIPT_VERSION="1.5.22"
 MIHOMO_DIR="/etc/mihomo-lite"
 MIHOMO_BIN="/usr/local/bin/mihomo"
 CLOUDFLARED_BIN="/usr/local/bin/cloudflared"
@@ -788,7 +788,7 @@ _build_links() {
         local user pass sni
         user=$(jq -r '.username' <<<"$n"); pass=$(jq -r '.password' <<<"$n"); sni=$(jq -r '.sni' <<<"$n")
         link="anytls://${user}:${pass}@${host}:${port}?sni=${sni}&fp=chrome&insecure=1#${enc_name}"
-        printf '  - name: "%s"\n    type: anytls\n    server: "%s"\n    port: %s\n    username: %s\n    password: "%s"\n    sni: %s\n    client-fingerprint: chrome\n    skip-cert-verify: true\n' "$tag" "$ip" "$port" "$user" "$pass" "$sni" >> "$yaml_file"
+        printf '  - name: "%s"\n    type: anytls\n    server: "%s"\n    port: %s\n    username: \"%s\"\n    password: "%s"\n    sni: %s\n    client-fingerprint: chrome\n    skip-cert-verify: true\n' "$tag" "$ip" "$port" "$user" "$pass" "$sni" >> "$yaml_file"
         ;;
       mieru)
         local user pass transport
@@ -1377,7 +1377,9 @@ _add_anytls() {
   local port="$ASK_PORT_RESULT" sni user pass
   sni=$(_pick_sni)
   read -rp "SNI [${sni}]: " s; sni="${s:-$sni}"
-  user="u1"; pass=$(_gen_hex 16)
+  user="u$(_gen_hex 3)"; pass=$(_gen_hex 16)   # 用户名不限于 u1, 每次随机生成
+  read -rp "认证用户名 [${user}]: " mu || mu=""
+  mu=$(printf '%s' "${mu%$\r}" | tr -d '[:space:]'); [ -n "$mu" ] && user="$mu"
   read -rp "认证密码 [${pass}]: " p; pass="${p:-$pass}"
   local ck; ck=$(_gen_selfsigned_cert "$sni" "anytls-${port}") || return 1
   _ask_ip_ver
@@ -1395,7 +1397,9 @@ _add_mieru() {
   _ask_port_range || return 1
   local port="$ASK_PORT_RESULT" range="${ASK_RANGE_RESULT:-}" user pass transport
   _ask_transport "TCP"; transport="$ASK_TRANSPORT_RESULT"
-  user="u1"; pass=$(_gen_hex 16)
+  user="u$(_gen_hex 3)"; pass=$(_gen_hex 16)   # 用户名任意, 每次随机生成
+  read -rp "认证用户名 [${user}]: " mu || mu=""
+  mu=$(printf '%s' "${mu%$\r}" | tr -d '[:space:]'); [ -n "$mu" ] && user="$mu"
   read -rp "认证密码 [${pass}]: " p; pass="${p:-$pass}"
   _ask_ip_ver
   _ask_node_name "$(_proto_label mieru)"
@@ -1606,6 +1610,8 @@ _modify_node_menu() {
       filter=' | .password = $pass'
       ;;
     mieru)
+      user=$(jq -r --argjson i "$idx" '.nodes[$i].username // "u1"' "$METADATA_FILE")
+      read -rp "认证用户名 [${user}]: " v; user="${v:-$user}"
       pass=$(jq -r --argjson i "$idx" '.nodes[$i].password // ""' "$METADATA_FILE")
       read -rp "认证密码 [${pass}]: " v; pass="${v:-$pass}"
       # 传输层可在线切换: TCP <-> UDP, 回车保留当前值
@@ -1645,7 +1651,7 @@ _modify_node_menu() {
           range=""
         fi
       fi
-      filter=' | .password = $pass | .transport = $transport | .port_range = (if $range == "" then null else $range end)'
+      filter=' | .username = $user | .password = $pass | .transport = $transport | .port_range = (if $range == "" then null else $range end)'
       ;;
     ss2022)
       pass=$(jq -r --argjson i "$idx" '.nodes[$i].password // ""' "$METADATA_FILE")
@@ -1687,6 +1693,7 @@ _modify_node_menu() {
   local tmp="${METADATA_FILE}.tmp"
   if jq --argjson i "$idx" \
         --arg name "$new_name" \
+        --arg user "${user:-}" \
         --argjson port "$new_port" \
         --arg tag "$new_tag" \
         --arg ipver "$ip_ver_new" \

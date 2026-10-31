@@ -1,6 +1,6 @@
 # mihomo-lite
 
-> 版本：v1.5.18
+> 版本：v1.5.19
 >
 > **⚠️ 测试阶段（BETA）**：本项目当前处于测试阶段，功能与配置格式可能随时调整，请勿在生产环境使用。
 
@@ -169,6 +169,19 @@ Argo 的 TLS 由 Cloudflare 边缘终结，证书就是隧道域名本身，所�
 固定隧道添加时会把 Public Hostname 写进节点的 `argo_domain`；旧数据缺这个字段时，链接生成会自动回退用隧道全局域名，不会再出现「节点在、链接不在」。
 
 节点命名与其它协议同一套规则：**地区.运营商.协议**，用 `.` 分隔、不带端口，Argo 节点只留 `Argo` 一段。例如 `SG.Dromatics.Argo`。分享链接里不再加 `arg-` 前缀。要改名走【Argo 管理 → 3 修改】。
+
+### TLS 指纹
+
+所有走 TCP+TLS 的节点，客户端侧统一 uTLS **chrome** 指纹：
+
+| 协议 | 链接参数 | clash.yaml |
+|---|---|---|
+| VLESS + Reality / XHTTP | `fp=chrome` | `client-fingerprint: chrome` |
+| Trojan + Reality | `fp=chrome` | `client-fingerprint: chrome` |
+| VLESS / VMess + WS（Argo） | `fp=chrome`（VMess 为 JSON 的 `fp` 字段） | `client-fingerprint: chrome` |
+| AnyTLS | `fp=chrome` | `client-fingerprint: chrome` |
+
+Hy2 / TUIC 是 QUIC，uTLS 指纹只作用于 TCP 上的 TLS ClientHello，套不到 QUIC 的握手，所以这两个协议不加 `fp`——不是漏了。SS2022 与 Mieru 本身不涉及 TLS 指纹。
 
 ## 关于订阅
 

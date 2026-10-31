@@ -17,7 +17,7 @@
 umask 077
 export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin${PATH:+:$PATH}"
 
-SCRIPT_VERSION="1.5.18"
+SCRIPT_VERSION="1.5.19"
 MIHOMO_DIR="/etc/mihomo-lite"
 MIHOMO_BIN="/usr/local/bin/mihomo"
 CLOUDFLARED_BIN="/usr/local/bin/cloudflared"
@@ -712,13 +712,14 @@ _build_links() {
         if [ "$proto" = "vless-ws" ]; then
           # sni 显式写成隧道域名: CF 边缘的证书就是这个域, 有的客户端(旧 v2rayN/部分安卓内核)
           # 不会从 host 推导 TLS 的 server_name, 缺 sni 会握手失败或落到证书不匹配
-          link="vless://${uuid}@${domain}:443?encryption=none&security=tls&sni=${domain}&host=${domain}&type=ws&path=$(_url_encode "$path")#${enc_name}"
-          printf '  - name: "%s"\n    type: vless\n    server: "%s"\n    port: 443\n    uuid: %s\n    udp: true\n    tls: true\n    servername: %s\n    network: ws\n    ws-opts:\n      path: "%s"\n      headers:\n        Host: %s\n' "$tag" "$domain" "$uuid" "$domain" "$path" "$domain" >> "$yaml_file"
+          # fp 统一 uTLS chrome, 与 Reality 系列节点保持一致, 避免 JA3/JA4 一眼看出是裸 TLS 客户端
+          link="vless://${uuid}@${domain}:443?encryption=none&security=tls&sni=${domain}&fp=chrome&host=${domain}&type=ws&path=$(_url_encode "$path")#${enc_name}"
+          printf '  - name: "%s"\n    type: vless\n    server: "%s"\n    port: 443\n    uuid: %s\n    udp: true\n    tls: true\n    servername: %s\n    client-fingerprint: chrome\n    network: ws\n    ws-opts:\n      path: "%s"\n      headers:\n        Host: %s\n' "$tag" "$domain" "$uuid" "$domain" "$path" "$domain" >> "$yaml_file"
         else
           local vj
-          vj=$(jq -cn --arg v "2" --arg u "$uuid" --arg d "$domain" --arg t "$tag" --arg p "$path" '{v:$v,ps:$t,add:$d,port:"443",id:$u,aid:"0",scy:"auto",net:"ws",type:"none",host:$d,path:$p,tls:"tls",sni:$d}')
+          vj=$(jq -cn --arg v "2" --arg u "$uuid" --arg d "$domain" --arg t "$tag" --arg p "$path" '{v:$v,ps:$t,add:$d,port:"443",id:$u,aid:"0",scy:"auto",net:"ws",type:"none",host:$d,path:$p,tls:"tls",sni:$d,fp:"chrome"}')
           link="vmess://$(_b64_nopad "$vj")"
-          printf '  - name: "%s"\n    type: vmess\n    server: "%s"\n    port: 443\n    uuid: %s\n    alterId: 0\n    cipher: auto\n    udp: true\n    tls: true\n    servername: %s\n    network: ws\n    ws-opts:\n      path: "%s"\n      headers:\n        Host: %s\n' "$tag" "$domain" "$uuid" "$domain" "$path" "$domain" >> "$yaml_file"
+          printf '  - name: "%s"\n    type: vmess\n    server: "%s"\n    port: 443\n    uuid: %s\n    alterId: 0\n    cipher: auto\n    udp: true\n    tls: true\n    servername: %s\n    client-fingerprint: chrome\n    network: ws\n    ws-opts:\n      path: "%s"\n      headers:\n        Host: %s\n' "$tag" "$domain" "$uuid" "$domain" "$path" "$domain" >> "$yaml_file"
         fi
         ;;
       hysteria2)
@@ -742,8 +743,8 @@ _build_links() {
       anytls)
         local user pass sni
         user=$(jq -r '.username' <<<"$n"); pass=$(jq -r '.password' <<<"$n"); sni=$(jq -r '.sni' <<<"$n")
-        link="anytls://${user}:${pass}@${host}:${port}?sni=${sni}&insecure=1#${enc_name}"
-        printf '  - name: "%s"\n    type: anytls\n    server: "%s"\n    port: %s\n    username: %s\n    password: "%s"\n    sni: %s\n    skip-cert-verify: true\n' "$tag" "$ip" "$port" "$user" "$pass" "$sni" >> "$yaml_file"
+        link="anytls://${user}:${pass}@${host}:${port}?sni=${sni}&fp=chrome&insecure=1#${enc_name}"
+        printf '  - name: "%s"\n    type: anytls\n    server: "%s"\n    port: %s\n    username: %s\n    password: "%s"\n    sni: %s\n    client-fingerprint: chrome\n    skip-cert-verify: true\n' "$tag" "$ip" "$port" "$user" "$pass" "$sni" >> "$yaml_file"
         ;;
       mieru)
         local user pass transport

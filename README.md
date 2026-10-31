@@ -1,6 +1,6 @@
 # mihomo-lite
 
-> 版本：v1.5.17
+> 版本：v1.5.18
 >
 > **⚠️ 测试阶段（BETA）**：本项目当前处于测试阶段，功能与配置格式可能随时调整，请勿在生产环境使用。
 
@@ -125,9 +125,30 @@ Argo 节点和隧道是一体的，所以端口/域名这类字段**不在「节
 |---|---|
 | 回源监听端口 | WS 监听端口（仅 127.0.0.1）。改完同步更新节点 tag 与 `run-argo.sh`，隧道指向随之切换。固定隧道需要你在 CF 面板把 Public Hostname 的 URL 改成 `127.0.0.1:新端口`；临时隧道会重新分配域名 |
 | 隧道域名 | 固定隧道填 Public Hostname；临时隧道留空即可（启动后自动探测回填） |
+| 传输协议 | `1) http2 (TCP/7844)` / `2) quic (UDP/7844)`，落到 `argo.protocol`，重写 `run-argo.sh` 并重启。回退行为不变：选定协议 20 秒内退出就换另一条，`ARGO_NO_FALLBACK=1` 时只跑选定协议 |
 | 连接 CF 边缘的 IP 版本 | `1) 仅 IPv4` / `2) 仅 IPv6` / `3) auto`，落到 `cloudflared --edge-ip-version`；写入 `argo.edge_ip`，重启沿用。这台机器 IPv6 到 CF 不通、或想固定走 v4 时用这个 |
 
 改完自动重写 `run-argo.sh`、重建配置并重启；临时隧道会等新域名探测出来再刷新链接。
+
+手动切协议（不走菜单）有两种写法，效果一样——改的是同一份 `argo.protocol`，`run-argo.sh` 在下次 `mh` 启动时按它重建：
+
+```bash
+# 写法一: 直接改 metadata, 再跑一次 mh(会自动重建并重启 argo)
+jq '.argo.protocol="quic"' /etc/mihomo-lite/metadata.json > /tmp/m.json && mv /tmp/m.json /etc/mihomo-lite/metadata.json
+mh
+
+# 写法二: 用环境变量覆盖一次(只影响这一次生成的 run-argo.sh)
+ARGO_PROTOCOL=quic mh
+```
+
+只想验证 quic 到底通不通，别让它偷偷回退到 http2：
+
+```bash
+ARGO_NO_FALLBACK=1 ARGO_PROTOCOL=quic mh
+tail -f /var/log/mihomo-argo.log     # 看到 "Registered tunnel connection" 就是通了
+```
+
+反过来，如果你直接改 `run-argo.sh` 里的 `PROTO_LIST`，记得 `systemctl restart mihomo-argo`，而且下次跑 `mh` 会被 metadata 覆盖回去——`run-argo.sh` 是生成物，不是配置源。
 
 ### 查看 Argo 隧道（Argo 管理 → 4）
 

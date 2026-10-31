@@ -17,7 +17,7 @@
 umask 077
 export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin${PATH:+:$PATH}"
 
-SCRIPT_VERSION="1.5.17"
+SCRIPT_VERSION="1.5.18"
 MIHOMO_DIR="/etc/mihomo-lite"
 MIHOMO_BIN="/usr/local/bin/mihomo"
 CLOUDFLARED_BIN="/usr/local/bin/cloudflared"
@@ -1831,18 +1831,20 @@ _modify_argo_menu() {
     return 1
   fi
   local mode token domain port edge new_port new_domain new_edge v
-  local cur_name new_name
+  local cur_name new_name cur_proto new_proto
   mode=$(jq -r '.argo.mode // "temp"' "$METADATA_FILE")
   token=$(jq -r '.argo.token // ""' "$METADATA_FILE")
   domain=$(jq -r '.argo.domain // ""' "$METADATA_FILE")
   port=$(jq -r '.argo.port // 8888' "$METADATA_FILE")
   edge=$(jq -r '.argo.edge_ip // "auto"' "$METADATA_FILE")
+  cur_proto=$(jq -r '.argo.protocol // "http2"' "$METADATA_FILE")
   cur_name=$(jq -r '[.nodes[]? | select(.proto == "vless-ws" or .proto == "vmess-ws") | .name][0] // ""' "$METADATA_FILE")
 
   echo "当前 Argo 配置:"
   echo "  模式: ${mode}   回源端口: ${port}"
   echo "  节点名称: ${cur_name:-未设置}"
   echo "  域名: ${domain:-未设置(临时隧道启动后自动探测)}"
+  echo "  传输协议: ${cur_proto}  (http2=TCP/7844  quic=UDP/7844)"
   echo "  连接 CF 边缘: ${edge}  (4=仅IPv4  6=仅IPv6  auto=cloudflared 自选)"
   echo ""
 
@@ -1890,11 +1892,27 @@ _modify_argo_menu() {
     *)           _warn "输入 '${v}' 无法识别，保留 ${edge}。"; new_edge="$edge" ;;
   esac
 
+  # 4) 传输协议: http2(TCP/7844) 与 quic(UDP/7844) 之间切换
+  new_proto="$cur_proto"
+  echo "Argo 传输协议: 1) http2 (TCP/7844)  2) quic (UDP/7844)"
+  read -rp "选择 [当前 ${cur_proto}]: " v || v=""
+  v=$(printf '%s' "${v%$'\r'}" | tr -d '[:space:]' | tr 'a-z' 'A-Z')
+  case "$v" in
+    1|HTTP2|H2) new_proto="http2" ;;
+    2|QUIC)     new_proto="quic" ;;
+    "")         new_proto="$cur_proto" ;;
+    *)          _warn "输入 '${v}' 无法识别，保留 ${cur_proto}。"; new_proto="$cur_proto" ;;
+  esac
+  if [ -n "${ARGO_PROTOCOL:-}" ] && [ "${ARGO_PROTOCOL}" != "$new_proto" ]; then
+    _warn "环境变量 ARGO_PROTOCOL=${ARGO_PROTOCOL} 优先级更高，会盖掉这里的 ${new_proto}。"
+  fi
+
   # 写回: argo 状态 + WS 节点(名称/端口/tag), tag 形如 argo-端口, 端口变了要同步
   local tmp="${METADATA_FILE}.tmp"
   if jq --argjson port "$new_port" --arg edge "$new_edge" --arg nm "$new_name" \
+        --arg proto "$new_proto" \
         --arg oldtag "argo-${port}" --arg newtag "argo-${new_port}" \
-        '.argo.port = $port | .argo.edge_ip = $edge
+        '.argo.port = $port | .argo.edge_ip = $edge | .argo.protocol = $proto
          | .nodes |= map(
              if (.proto == "vless-ws" or .proto == "vmess-ws")
              then .port = $port
@@ -1927,7 +1945,10 @@ _modify_argo_menu() {
     _warn "固定隧道需在 CF 面板把 Public Hostname 的 URL 改成 127.0.0.1:${new_port}，否则回源失败。"
   fi
   _show_links
-  _success "Argo 配置已更新 (名称 ${new_name:-未变} / 端口 ${new_port} / 边缘 IP ${new_edge} / 域名 ${new_domain:-待探测})。"
+  _success "Argo 配置已更新 (名称 ${new_name:-未变} / 端口 ${new_port} / 协议 ${new_proto} / 边缘 IP ${new_edge} / 域名 ${new_domain:-待探测})。"
+  if [ "$new_proto" != "$cur_proto" ]; then
+    _info "协议已切到 ${new_proto}。若 20 秒内连不上, 会自动回退到另一条协议并写进 ${ARGO_LOG}；想严格只用 ${new_proto}: ARGO_NO_FALLBACK=1"
+  fi
 }
 
 # 查看 Argo 隧道与节点(Argo 节点与隧道绑定, 不单独出现在节点修改里, 统一在这里看)
@@ -2207,7 +2228,7 @@ _main_menu() {
       2)
         echo " 1) 添加 Argo 节点"
         echo " 2) 删除 Argo 节点 / Argo 隧道"
-        echo " 3) 修改 Argo 配置 (回源端口 / 隧道域名 / 连接 CF 的 IP 版本)"
+        echo " 3) 修改 Argo 配置 (回源端口 / 隧道域名 / 传输协议 / 连接 CF 的 IP 版本)"
         echo " 4) 查看 Argo 隧道与节点链接"
         echo " 5) 诊断 (cloudflared / 单元 / 日志 / 端口 一次看全)"
         echo " 0) 返回"

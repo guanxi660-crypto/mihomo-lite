@@ -17,7 +17,7 @@
 umask 077
 export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin${PATH:+:$PATH}"
 
-SCRIPT_VERSION="1.5.23"
+SCRIPT_VERSION="1.5.24"
 MIHOMO_DIR="/etc/mihomo-lite"
 MIHOMO_BIN="/usr/local/bin/mihomo"
 CLOUDFLARED_BIN="/usr/local/bin/cloudflared"
@@ -752,7 +752,12 @@ _build_links() {
         domain=$(jq -r '.argo_domain // ""' <<<"$n")
         # 兼容旧数据/固定隧道首次添加: 节点上没写 argo_domain 时回退到隧道全局域名
         [ -z "$domain" ] && domain=$(jq -r '.argo.domain // ""' "$METADATA_FILE" 2>/dev/null)
-        [ -z "$domain" ] && continue
+        if [ -z "$domain" ]; then
+          # 缺域名时节点会被整块跳过(链接和 clash 里都没有), 必须显式告警, 不能静默
+          _warn "Argo 节点 ${tag} 缺少隧道域名，已跳过（未写入链接与 clash.yaml）。"
+          _warn "修复：菜单【2 Argo 管理 → 10 重新获取临时域名】或【3 修改】填好域名后会自动重建。"
+          continue
+        fi
         if [ "$proto" = "vless-ws" ]; then
           # sni 显式写成隧道域名: CF 边缘的证书就是这个域, 有的客户端(旧 v2rayN/部分安卓内核)
           # 不会从 host 推导 TLS 的 server_name, 缺 sni 会握手失败或落到证书不匹配

@@ -17,7 +17,7 @@
 umask 077
 export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin${PATH:+:$PATH}"
 
-SCRIPT_VERSION="1.5.24"
+SCRIPT_VERSION="1.5.25"
 MIHOMO_DIR="/etc/mihomo-lite"
 MIHOMO_BIN="/usr/local/bin/mihomo"
 CLOUDFLARED_BIN="/usr/local/bin/cloudflared"
@@ -314,8 +314,61 @@ _ask_node_name() {
 # mihomo 的 mieru listener 用 port: "a-b" 会给段内每个端口各开一个监听(实测验证),
 # 内存约 12KB + 1 个 fd / 端口, 默认上限 1000 个, 可用 MAX_RANGE_PORTS 覆盖。
 MAX_RANGE_PORTS="${MAX_RANGE_PORTS:-1000}"
+# 列出 [a,b] 内已被监听占用的端口(最多 8 个), 空格分隔
+_range_conflicts() {
+  local a="$1" b="$2" ex="$3"
+  local exa="" exb=""
+  if [ -n "$ex" ]; then exa="${ex%%-*}"; exb="${ex##*-}"; fi
+  ss -H -ltn 2>/dev/null | awk -v a="$a" -v b="$b" -v ea="$exa" -v eb="$exb" '{
+      p=$4; sub(/.*:/,"",p)
+      if (p !~ /^[0-9]+$/) next
+      v=p+0
+      if (v < a || v > b) next
+      if (ea != "" && v+0 >= ea+0 && v+0 <= eb+0) next   # 跳过本节点自己在监听的范围
+      print p
+    }' | sort -un | head -8 | tr '
+' ' '
+}
+
+# 校验端口段 "a-b": 格式/区间/数量上限/整段占用扫描/临时端口区提醒
+# 成功时写 RANGE_A RANGE_B RANGE_N 并返回 0
+_validate_range() {
+  local excl="${2:-}"
+  local p="${1// /}" a b n busy maxfd
+  if ! [[ "$p" =~ ^([0-9]+)-([0-9]+)$ ]]; then
+    _error "格式应为 a-b，例如 20000-20999。"
+    return 1
+  fi
+  a="${BASH_REMATCH[1]}"; b="${BASH_REMATCH[2]}"
+  { [ "$a" -ge 1 ] && [ "$b" -le 65535 ] && [ "$a" -lt "$b" ]; } || {
+    _error "端口段无效 (需 1 <= a < b <= 65535)。"; return 1; }
+  n=$(( b - a + 1 ))
+  if [ "$n" -gt "$MAX_RANGE_PORTS" ]; then
+    _error "范围 ${n} 个端口超过上限 ${MAX_RANGE_PORTS}（每个端口一个监听，约 30KB 内存 + 1 个 fd）。"
+    _info "确实需要就用 MAX_RANGE_PORTS=${n} 重新运行。"
+    return 1
+  fi
+  # 整段扫描: mieru 段内任一端口 bind 失败 → 整个 listener 起不来(实测), 必须全段干净
+  busy=$(_range_conflicts "$a" "$b" "$excl")
+  if [ -n "$busy" ]; then
+    _error "端口段 ${a}-${b} 内已被占用的端口: ${busy}"
+    _error "mieru 段内任一端口被占用会导致整个节点起不来，已取消。换个段再试。"
+    return 1
+  fi
+  # 临时端口区(默认 32768-60999)会被出站连接先占, 重启时可能 bind 失败
+  if [ "$a" -le 60999 ] && [ "$b" -ge 32768 ]; then
+    _warn "端口段与临时端口区(32768-60999)重叠：出站连接可能先占住区间内端口，重启时有 bind 失败风险，建议整段 ≤ 32767。"
+  fi
+  maxfd=$(ulimit -n 2>/dev/null || echo 1024)
+  if [ "${maxfd:-1024}" -lt $(( n + 256 )) ] && [ "${maxfd:-1024}" -ne 1048576 ]; then
+    _warn "当前 fd 上限 ${maxfd}，段内 ${n} 个端口 + 并发连接可能不够；systemd 服务已设 LimitNOFILE=65535，直跑模式请先 ulimit -n 65535。"
+  fi
+  RANGE_A="$a"; RANGE_B="$b"; RANGE_N="$n"
+  return 0
+}
+
 _ask_port_range() {
-  local mode p a b n i rp def_a def_b
+  local mode p i rp def_a def_b
   echo "端口方式: 1) 单端口（客户端固定用这个端口）  2) 端口段（客户端每条连接随机挑，抗封锁更强）"
   read -rp "选择 [1]: " mode || mode=""
   mode=$(printf '%s' "${mode%$'\r'}" | tr -d '[:space:]')
@@ -324,32 +377,20 @@ _ask_port_range() {
     ASK_RANGE_RESULT=""
     return 0
   fi
+  # 默认段随机起点 20000-30800, 保证段尾 <= 31799 落在临时端口区以下
   for i in $(seq 1 50); do
-    rp=$(shuf -i 20000-64000 -n 1 2>/dev/null || echo $(( (RANDOM % 44000) + 20000 )))
+    rp=$(shuf -i 20000-30800 -n 1 2>/dev/null || echo $(( (RANDOM % 10800) + 20000 )))
     if ! _check_port_conflict "$rp"; then def_a="$rp"; break; fi
   done
   [ -z "${def_a:-}" ] && def_a=20000
-  def_b=$(( def_a + 999 )); [ "$def_b" -gt 65535 ] && def_b=65535
+  def_b=$(( def_a + 999 ))
   read -rp "端口段 (格式 a-b) [${def_a}-${def_b}]: " p || p=""
   p=$(printf '%s' "${p%$'\r'}" | tr -d '[:space:]')
   [ -z "$p" ] && p="${def_a}-${def_b}"
-  if ! [[ "$p" =~ ^([0-9]+)-([0-9]+)$ ]]; then
-    _error "格式应为 a-b，例如 20000-20999。"
-    return 1
-  fi
-  a="${BASH_REMATCH[1]}"; b="${BASH_REMATCH[2]}"
-  { [ "$a" -ge 1 ] && [ "$b" -le 65535 ] && [ "$a" -lt "$b" ]; } || { _error "端口段无效 (需 1 <= a < b <= 65535)。"; return 1; }
-  n=$(( b - a + 1 ))
-  if [ "$n" -gt "$MAX_RANGE_PORTS" ]; then
-    _error "范围 ${n} 个端口超过上限 ${MAX_RANGE_PORTS}（每端口一个监听，约 12KB 内存 + 1 个 fd）。"
-    _info "确实需要就用 MAX_RANGE_PORTS=${n} 重新运行。"
-    return 1
-  fi
-  _check_port_conflict "$a" && return 1
-  _check_port_conflict "$b" && return 1
-  _info "端口段: ${a}-${b}（共 ${n} 个，记得在防火墙/安全组整段放行对应传输层）"
-  ASK_PORT_RESULT="$a"
-  ASK_RANGE_RESULT="${a}-${b}"
+  _validate_range "$p" || return 1
+  _info "端口段: ${RANGE_A}-${RANGE_B}（共 ${RANGE_N} 个，记得在防火墙/安全组整段放行对应传输层）"
+  ASK_PORT_RESULT="$RANGE_A"
+  ASK_RANGE_RESULT="${RANGE_A}-${RANGE_B}"
 }
 
 _check_port_conflict() {
@@ -1001,6 +1042,8 @@ Type=simple
 ExecStart=${MIHOMO_BIN} -d ${MIHOMO_DIR}
 Restart=on-failure
 RestartSec=5
+# mieru 端口段每个端口一个监听 socket, 默认 1024 个 fd 不够用
+LimitNOFILE=65535
 
 [Install]
 WantedBy=multi-user.target
@@ -1648,7 +1691,7 @@ _modify_node_menu() {
       _ask_transport "$(jq -r --argjson i "$idx" '.nodes[$i].transport // "TCP"' "$METADATA_FILE")"
       transport="$ASK_TRANSPORT_RESULT"
       # 端口段: 回车保留 / 输入 a-b 改成端口段 / 输入 - 取消端口段(回到单端口)
-      local rng_cur a b cnt
+      local rng_cur
       rng_cur=$(jq -r --argjson i "$idx" '.nodes[$i].port_range // ""' "$METADATA_FILE")
       echo "当前监听: ${rng_cur:-${new_port}（单端口）}"
       read -rp "端口段 (a-b 设置 / - 取消 / 回车保留) [${rng_cur:-无}]: " v || v=""
@@ -1658,22 +1701,15 @@ _modify_node_menu() {
         range=""
         _info "已取消端口段，改为单端口 ${new_port}。"
       elif [ -n "$v" ]; then
-        if ! [[ "$v" =~ ^([0-9]+)-([0-9]+)$ ]]; then
-          _error "格式应为 a-b，未做修改。"
+        # 排除本节点当前正占着的端口(否则会把自己的监听判成占用)
+        if _validate_range "$v" "${rng_cur:-${new_port}}"; then
+          range="${RANGE_A}-${RANGE_B}"
+          new_port="$RANGE_A"
+          _info "端口段: ${RANGE_A}-${RANGE_B}（共 ${RANGE_N} 个）"
+        else
+          _error "未做修改。"
           return 1
         fi
-        a="${BASH_REMATCH[1]}"; b="${BASH_REMATCH[2]}"
-        { [ "$a" -ge 1 ] && [ "$b" -le 65535 ] && [ "$a" -lt "$b" ]; } || { _error "端口段无效 (需 1 <= a < b <= 65535)，未做修改。"; return 1; }
-        cnt=$(( b - a + 1 ))
-        if [ "$cnt" -gt "$MAX_RANGE_PORTS" ]; then
-          _error "范围 ${cnt} 个端口超过上限 ${MAX_RANGE_PORTS}，未做修改。"
-          return 1
-        fi
-        _check_port_conflict "$a" && return 1
-        _check_port_conflict "$b" && return 1
-        range="$v"
-        new_port="$a"
-        _info "端口段: ${a}-${b}（共 ${cnt} 个）"
       else
         range="$rng_cur"
         if [ -n "$range" ] && [ "${range%%-*}" != "$new_port" ]; then

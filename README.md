@@ -1,6 +1,6 @@
 # mihomo-lite
 
-> 版本：v1.5.19
+> 版本：v1.5.20
 >
 > **⚠️ 测试阶段（BETA）**：本项目当前处于测试阶段，功能与配置格式可能随时调整，请勿在生产环境使用。
 
@@ -29,7 +29,7 @@ mihomo 内核多协议服务端一键管理脚本，交互风格参考 [singbox-
 | Hysteria2 | Salamander 混淆 + masquerade 伪装 |
 | TUIC v5 | QUIC / 0-RTT / BBR |
 | AnyTLS | TLS 流量填充 |
-| Mieru | TCP/UDP 自研加密（无通用分享链接，输出 clash.yaml） |
+| Mieru | TCP/UDP 自研加密，支持**单端口或端口段**（端口跳跃，客户端每条连接随机挑）；无通用分享链接，输出 clash.yaml |
 | Shadowsocks 2022 | blake3 三种加密，严格长度密钥校验 |
 | Trojan + Reality | 无需证书 |
 | VLESS / VMess + WS + Argo | 临时隧道（自动探测域名）或固定隧道（Token） |
@@ -40,6 +40,7 @@ mihomo 内核多协议服务端一键管理脚本，交互风格参考 [singbox-
 - 8 种协议：XHTTP+Reality（首选）/ Reality+Vision / Hysteria2 / TUIC v5 / AnyTLS / Mieru / SS2022 / Trojan-Reality
 - 节点默认命名「地区.运营商.协议」（点分隔、不带端口），可自定义覆盖；重名自动追加 `.2`/`.3`（客户端 proxies 不允许同名）
 - 修改节点时 Mieru 可在 **TCP / UDP** 之间在线切换，改完自动重建配置并重启
+- Mieru 端口段（端口跳跃）：`port: "20000-20999"`，段内每个端口各开一个监听（约 12KB 内存 + 1 fd / 端口），默认上限 1000 个，可用 `MAX_RANGE_PORTS=2000 mh` 放宽；客户端自动写 `port-range`。修改节点时输入 `a-b` 设置、输入 `-` 取消
 - 对外端口默认随机空闲端口（避免撞车），Argo 回源端口默认 8888（仅监听 127.0.0.1，可在 Argo 管理里改）
 - 节点可选对外 **IPv4 / IPv6**：双栈机器添加时选择、单栈机器自动采用，纯 IPv6 机器自动以 `::` 监听（Argo 节点例外：对外走 Cloudflare 域名，添加时问的是 cloudflared 传输协议）
 - 按 CPU 能力选择内核（x86-64-v3 优化版 / compatible 兼容版），老 CPU 可正常运行

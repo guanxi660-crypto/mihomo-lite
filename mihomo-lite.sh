@@ -17,7 +17,7 @@
 umask 077
 export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin${PATH:+:$PATH}"
 
-SCRIPT_VERSION="1.5.19"
+SCRIPT_VERSION="1.5.20"
 MIHOMO_DIR="/etc/mihomo-lite"
 MIHOMO_BIN="/usr/local/bin/mihomo"
 CLOUDFLARED_BIN="/usr/local/bin/cloudflared"
@@ -310,6 +310,48 @@ _ask_node_name() {
   _info "节点名称: ${NODE_NAME}"
 }
 
+# mieru 专用: 端口方式 (单端口 / 端口段)
+# mihomo 的 mieru listener 用 port: "a-b" 会给段内每个端口各开一个监听(实测验证),
+# 内存约 12KB + 1 个 fd / 端口, 默认上限 1000 个, 可用 MAX_RANGE_PORTS 覆盖。
+MAX_RANGE_PORTS="${MAX_RANGE_PORTS:-1000}"
+_ask_port_range() {
+  local mode p a b n i rp def_a def_b
+  echo "端口方式: 1) 单端口（客户端固定用这个端口）  2) 端口段（客户端每条连接随机挑，抗封锁更强）"
+  read -rp "选择 [1]: " mode || mode=""
+  mode=$(printf '%s' "${mode%$'\r'}" | tr -d '[:space:]')
+  if [ "$mode" != "2" ]; then
+    _ask_port "Mieru 端口" rand || return 1
+    ASK_RANGE_RESULT=""
+    return 0
+  fi
+  for i in $(seq 1 50); do
+    rp=$(shuf -i 20000-64000 -n 1 2>/dev/null || echo $(( (RANDOM % 44000) + 20000 )))
+    if ! _check_port_conflict "$rp"; then def_a="$rp"; break; fi
+  done
+  [ -z "${def_a:-}" ] && def_a=20000
+  def_b=$(( def_a + 999 )); [ "$def_b" -gt 65535 ] && def_b=65535
+  read -rp "端口段 (格式 a-b) [${def_a}-${def_b}]: " p || p=""
+  p=$(printf '%s' "${p%$'\r'}" | tr -d '[:space:]')
+  [ -z "$p" ] && p="${def_a}-${def_b}"
+  if ! [[ "$p" =~ ^([0-9]+)-([0-9]+)$ ]]; then
+    _error "格式应为 a-b，例如 20000-20999。"
+    return 1
+  fi
+  a="${BASH_REMATCH[1]}"; b="${BASH_REMATCH[2]}"
+  { [ "$a" -ge 1 ] && [ "$b" -le 65535 ] && [ "$a" -lt "$b" ]; } || { _error "端口段无效 (需 1 <= a < b <= 65535)。"; return 1; }
+  n=$(( b - a + 1 ))
+  if [ "$n" -gt "$MAX_RANGE_PORTS" ]; then
+    _error "范围 ${n} 个端口超过上限 ${MAX_RANGE_PORTS}（每端口一个监听，约 12KB 内存 + 1 个 fd）。"
+    _info "确实需要就用 MAX_RANGE_PORTS=${n} 重新运行。"
+    return 1
+  fi
+  _check_port_conflict "$a" && return 1
+  _check_port_conflict "$b" && return 1
+  _info "端口段: ${a}-${b}（共 ${n} 个，记得在防火墙/安全组整段放行对应传输层）"
+  ASK_PORT_RESULT="$a"
+  ASK_RANGE_RESULT="${a}-${b}"
+}
+
 _check_port_conflict() {
   local port="$1"
   [[ ! "$port" =~ ^[0-9]+$ ]] || [ "$port" -lt 1 ] || [ "$port" -gt 65535 ] && { _error "端口 ${port} 无效 (1-65535)。"; return 0; }
@@ -588,13 +630,15 @@ EOF
 EOF
       ;;
     mieru)
-      local user pass transport
+      local user pass transport port_field
       user=$(jq -r '.username' <<<"$n"); pass=$(jq -r '.password' <<<"$n")
       transport=$(jq -r '.transport // "TCP"' <<<"$n")
+      # 端口段: mieru listener 支持 port: "a-b"，段内每端口各开一个监听
+      port_field=$(jq -r '.port_range // empty' <<<"$n"); [ -z "$port_field" ] && port_field="$port"
       cat <<EOF
   - name: "${tag}"
     type: mieru
-    port: ${port}
+    port: "${port_field}"
     listen: ${LISTEN_ADDR}
     transport: ${transport}
     users:
@@ -751,7 +795,11 @@ _build_links() {
         user=$(jq -r '.username' <<<"$n"); pass=$(jq -r '.password' <<<"$n")
         transport=$(jq -r '.transport // "TCP"' <<<"$n" | tr 'a-z' 'A-Z')
         # mieru 暂无通用分享链接规范，仅输出客户端 Clash 配置
-        printf '  - name: "%s"\n    type: mieru\n    server: "%s"\n    port: %s\n    username: "%s"\n    password: "%s"\n    transport: %s\n' "$tag" "$ip" "$port" "$user" "$pass" "$transport" >> "$yaml_file"
+        # 端口段必须写 port-range（不可与 port 同时书写），单端口写 port
+        local rng port_line
+        rng=$(jq -r '.port_range // empty' <<<"$n")
+        if [ -n "$rng" ]; then port_line="port-range: \"${rng}\""; else port_line="port: ${port}"; fi
+        printf '  - name: "%s"\n    type: mieru\n    server: "%s"\n    %s\n    username: "%s"\n    password: "%s"\n    transport: %s\n' "$tag" "$ip" "$port_line" "$user" "$pass" "$transport" >> "$yaml_file"
         ;;
       ss2022)
         local cipher pass userinfo
@@ -1329,8 +1377,8 @@ _add_anytls() {
 
 # [5] Mieru
 _add_mieru() {
-  _ask_port "请输入 Mieru 端口" rand || return 1
-  local port="$ASK_PORT_RESULT" user pass transport
+  _ask_port_range || return 1
+  local port="$ASK_PORT_RESULT" range="${ASK_RANGE_RESULT:-}" user pass transport
   _ask_transport "TCP"; transport="$ASK_TRANSPORT_RESULT"
   user="u1"; pass=$(_gen_hex 16)
   read -rp "认证密码 [${pass}]: " p; pass="${p:-$pass}"
@@ -1338,8 +1386,8 @@ _add_mieru() {
   _ask_node_name "$(_proto_label mieru)"
   local node
   node=$(jq -cn --arg tag "mieru-${port}" --arg name "$NODE_NAME" --arg port "$port" --arg ipver "$IP_VER" \
-    --arg user "$user" --arg pass "$pass" --arg tr "$transport" \
-    '{tag:$tag,name:$name,ip_ver:$ipver,proto:"mieru",port:($port|tonumber),username:$user,password:$pass,transport:$tr}')
+    --arg user "$user" --arg pass "$pass" --arg tr "$transport" --arg range "$range" \
+    '{tag:$tag,name:$name,ip_ver:$ipver,proto:"mieru",port:($port|tonumber),username:$user,password:$pass,transport:$tr} | if $range == "" then . else .port_range = $range end')
   _add_node_meta "$node"
   _regen_config; _restart_all; _show_links
 }
@@ -1455,7 +1503,7 @@ _modify_node_menu() {
   map=$(jq -r '.nodes | to_entries
         | map(select(.value.proto != "vless-ws" and .value.proto != "vmess-ws"))
         | to_entries[]
-        | "\(.key+1)\t\(.value.key)\t[\(.value.value.proto)] \(.value.value.name)\t\(.value.value.port)"' "$METADATA_FILE")
+        | "\(.key+1)\t\(.value.key)\t[\(.value.value.proto)] \(.value.value.name)\t\(.value.value.port_range // .value.value.port)"' "$METADATA_FILE")
   if [ -z "$map" ]; then
     _warn "没有可修改的节点。Argo 节点请在【Argo 管理 → 3 修改】里调整。"
     return
@@ -1508,7 +1556,7 @@ _modify_node_menu() {
   esac
 
   # 需要更新的值(默认=原值)与对应的 jq filter 片段
-  local sni uuid pass obfp path domain transport
+  local sni uuid pass obfp path domain transport range
   local filter=""
   case "$proto" in
     vless-xhttp)
@@ -1548,7 +1596,41 @@ _modify_node_menu() {
       # 传输层可在线切换: TCP <-> UDP, 回车保留当前值
       _ask_transport "$(jq -r --argjson i "$idx" '.nodes[$i].transport // "TCP"' "$METADATA_FILE")"
       transport="$ASK_TRANSPORT_RESULT"
-      filter=' | .password = $pass | .transport = $transport'
+      # 端口段: 回车保留 / 输入 a-b 改成端口段 / 输入 - 取消端口段(回到单端口)
+      local rng_cur a b cnt
+      rng_cur=$(jq -r --argjson i "$idx" '.nodes[$i].port_range // ""' "$METADATA_FILE")
+      echo "当前监听: ${rng_cur:-${new_port}（单端口）}"
+      read -rp "端口段 (a-b 设置 / - 取消 / 回车保留) [${rng_cur:-无}]: " v || v=""
+      v=$(printf '%s' "${v%$'
+'}" | tr -d '[:space:]')
+      if [ "$v" = "-" ]; then
+        range=""
+        _info "已取消端口段，改为单端口 ${new_port}。"
+      elif [ -n "$v" ]; then
+        if ! [[ "$v" =~ ^([0-9]+)-([0-9]+)$ ]]; then
+          _error "格式应为 a-b，未做修改。"
+          return 1
+        fi
+        a="${BASH_REMATCH[1]}"; b="${BASH_REMATCH[2]}"
+        { [ "$a" -ge 1 ] && [ "$b" -le 65535 ] && [ "$a" -lt "$b" ]; } || { _error "端口段无效 (需 1 <= a < b <= 65535)，未做修改。"; return 1; }
+        cnt=$(( b - a + 1 ))
+        if [ "$cnt" -gt "$MAX_RANGE_PORTS" ]; then
+          _error "范围 ${cnt} 个端口超过上限 ${MAX_RANGE_PORTS}，未做修改。"
+          return 1
+        fi
+        _check_port_conflict "$a" && return 1
+        _check_port_conflict "$b" && return 1
+        range="$v"
+        new_port="$a"
+        _info "端口段: ${a}-${b}（共 ${cnt} 个）"
+      else
+        range="$rng_cur"
+        if [ -n "$range" ] && [ "${range%%-*}" != "$new_port" ]; then
+          _warn "端口已改为 ${new_port}，与端口段 ${range} 不一致，已取消端口段。"
+          range=""
+        fi
+      fi
+      filter=' | .password = $pass | .transport = $transport | .port_range = (if $range == "" then null else $range end)'
       ;;
     ss2022)
       pass=$(jq -r --argjson i "$idx" '.nodes[$i].password // ""' "$METADATA_FILE")
@@ -1600,6 +1682,7 @@ _modify_node_menu() {
         --arg path "${path:-}" \
         --arg domain "${domain:-}" \
         --arg transport "${transport:-}" \
+        --arg range "${range:-}" \
         ".nodes[\$i] |= (.name = \$name | .port = \$port | .tag = \$tag | .ip_ver = \$ipver${filter})" \
         "$METADATA_FILE" > "$tmp" && [ -s "$tmp" ]; then
     mv "$tmp" "$METADATA_FILE"
@@ -2061,7 +2144,7 @@ _delete_node_menu() {
   count=$(jq '.nodes | length' "$METADATA_FILE" 2>/dev/null || echo 0)
   [ "$count" = "0" ] && { _warn "暂无节点。"; return; }
   echo "当前节点:"
-  jq -r '.nodes | to_entries[] | "  \(.key+1)) [\(.value.proto)] \(.value.name)  端口:\(.value.port)"' "$METADATA_FILE"
+  jq -r '.nodes | to_entries[] | "  \(.key+1)) [\(.value.proto)] \(.value.name)  端口:\(.value.port_range // .value.port)"' "$METADATA_FILE"
   read -rp "输入要删除的编号 (0 取消): " i
   [[ "$i" =~ ^[0-9]+$ ]] || return
   [ "$i" = "0" ] && return

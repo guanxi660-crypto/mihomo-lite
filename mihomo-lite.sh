@@ -17,7 +17,7 @@
 umask 077
 export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin${PATH:+:$PATH}"
 
-SCRIPT_VERSION="1.5.25"
+SCRIPT_VERSION="1.5.26"
 MIHOMO_DIR="/etc/mihomo-lite"
 MIHOMO_BIN="/usr/local/bin/mihomo"
 CLOUDFLARED_BIN="/usr/local/bin/cloudflared"
@@ -125,7 +125,14 @@ _resolve_node_ip() {
 
 # listener 监听地址: 有全局 IPv4 用 0.0.0.0(兼容所有环境), 纯 IPv6 机器必须用 ::
 # (0.0.0.0 只绑 IPv4, IPv6-only 机器上节点将完全连不上)
+# $1 = 节点的对外 IP 版本 (v4/v6)。双栈机器上 v6 节点必须绑 ::，
+# 否则 0.0.0.0 只监听 IPv4，v6 客户端连不上。
 _listen_addr() {
+  local ver="${1:-v4}"
+  if [ "$ver" = "v6" ] && [ -n "$(_get_ip6)" ]; then
+    echo "::"
+    return
+  fi
   if ip -4 addr show scope global 2>/dev/null | grep -q "inet "; then
     echo "0.0.0.0"
   else
@@ -254,7 +261,8 @@ _proto_label() {
 # 名称清洗: 去 \r、首尾空白与成对包裹的引号 (添加/修改两条路径共用)
 _normalize_name() {
   local s
-  s=$(printf '%s' "$1" | tr -d '\r')
+  # 去掉会破坏 YAML(引号/反斜杠)或链接(fragment)的字符与所有控制字符
+  s=$(printf '%s' "$1" | tr -d '\r\n\t' | tr -d '"' | tr -d '\\')
   s="${s#"${s%%[![:space:]]*}"}"
   s="${s%"${s##*[![:space:]]}"}"
   [[ ${#s} -ge 2 && "$s" == \"*\" ]] && s="${s:1:${#s}-2}"
@@ -316,10 +324,20 @@ _ask_node_name() {
 MAX_RANGE_PORTS="${MAX_RANGE_PORTS:-1000}"
 # 列出 [a,b] 内已被监听占用的端口(最多 8 个), 空格分隔
 _range_conflicts() {
-  local a="$1" b="$2" ex="$3"
-  local exa="" exb=""
+  local a="$1" b="$2" ex="$3" tr="${4:-TCP}"
+  local exa="" exb="" ssargs="-ltn"
   if [ -n "$ex" ]; then exa="${ex%%-*}"; exb="${ex##*-}"; fi
-  ss -H -ltn 2>/dev/null | awk -v a="$a" -v b="$b" -v ea="$exa" -v eb="$exb" '{
+  # mieru 的 UDP 传输占的是 UDP 端口, 只看 TCP 会漏。
+  # 注意: 不能把 -t -u 混在一次 ss 调用里(会多出 Netid 列, $4 不再是本地地址), 分两次取再合并
+  case "$(printf '%s' "$tr" | tr 'a-z' 'A-Z')" in
+    UDP) ssargs="u" ;;
+    BOTH|TCP+UDP) ssargs="tu" ;;
+    *) ssargs="t" ;;
+  esac
+  {
+    case "$ssargs" in *t*) ss -H -ltn 2>/dev/null ;; esac
+    case "$ssargs" in *u*) ss -H -lun 2>/dev/null ;; esac
+  } | awk -v a="$a" -v b="$b" -v ea="$exa" -v eb="$exb" '{
       p=$4; sub(/.*:/,"",p)
       if (p !~ /^[0-9]+$/) next
       v=p+0
@@ -333,7 +351,7 @@ _range_conflicts() {
 # 校验端口段 "a-b": 格式/区间/数量上限/整段占用扫描/临时端口区提醒
 # 成功时写 RANGE_A RANGE_B RANGE_N 并返回 0
 _validate_range() {
-  local excl="${2:-}"
+  local excl="${2:-}" tr="${3:-TCP+UDP}"
   local p="${1// /}" a b n busy maxfd
   if ! [[ "$p" =~ ^([0-9]+)-([0-9]+)$ ]]; then
     _error "格式应为 a-b，例如 20000-20999。"
@@ -349,7 +367,7 @@ _validate_range() {
     return 1
   fi
   # 整段扫描: mieru 段内任一端口 bind 失败 → 整个 listener 起不来(实测), 必须全段干净
-  busy=$(_range_conflicts "$a" "$b" "$excl")
+  busy=$(_range_conflicts "$a" "$b" "$excl" "$tr")
   if [ -n "$busy" ]; then
     _error "端口段 ${a}-${b} 内已被占用的端口: ${busy}"
     _error "mieru 段内任一端口被占用会导致整个节点起不来，已取消。换个段再试。"
@@ -505,7 +523,6 @@ _del_node_meta() {
 _regen_config() {
   local up
   up=$(jq -r '.argo.enabled // false' "$METADATA_FILE")
-  LISTEN_ADDR=$(_listen_addr)
   {
     echo "# 由 mihomo-lite 自动生成，请勿手动编辑"
     echo "mixed-port: 7890"
@@ -527,6 +544,7 @@ _emit_listener() {
   local n="$1"
   local tag proto port
   tag=$(jq -r '.tag' <<<"$n"); proto=$(jq -r '.proto' <<<"$n"); port=$(jq -r '.port' <<<"$n")
+  LISTEN_ADDR=$(_listen_addr "$(jq -r '.ip_ver // "v4"' <<<"$n")")
   case "$proto" in
     vless-xhttp)
       local xuuid xpk xsid xsni xpath xmode
@@ -1702,7 +1720,7 @@ _modify_node_menu() {
         _info "已取消端口段，改为单端口 ${new_port}。"
       elif [ -n "$v" ]; then
         # 排除本节点当前正占着的端口(否则会把自己的监听判成占用)
-        if _validate_range "$v" "${rng_cur:-${new_port}}"; then
+        if _validate_range "$v" "${rng_cur:-${new_port}}" "$transport"; then
           range="${RANGE_A}-${RANGE_B}"
           new_port="$RANGE_A"
           _info "端口段: ${RANGE_A}-${RANGE_B}（共 ${RANGE_N} 个）"
@@ -1981,7 +1999,7 @@ _probe_temp_domain() {
   _info "等待 Argo 临时隧道域名发布 (最长 30s)..."
   local domain=""
   for i in $(seq 1 30); do
-    d=$(grep -oE 'https://[a-z0-9-]+\.trycloudflare\.com' "$ARGO_LOG" 2>/dev/null | tail -n1 | sed 's|https://||')
+    domain=$(grep -oE 'https://[a-z0-9-]+\.trycloudflare\.com' "$ARGO_LOG" 2>/dev/null | tail -n1 | sed 's|https://||')
     [ -n "$domain" ] && break
     sleep 1
   done

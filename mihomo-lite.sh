@@ -743,6 +743,10 @@ EOF
 }
 
 # ---------------- 分享链接与客户端订阅 ----------------
+# YAML 双引号转义(反斜杠与双引号)。存量 metadata 不经过 _normalize_name 入口剥离,
+# 输出端必须转义,否则升级前写入的引号/反斜杠名称仍会破坏 clash.yaml。
+_yaml_q() { printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g'; }
+
 _build_links() {
   local ip; ip=$(_get_public_ip)
   local links_file="${SUB_DIR}/links.txt" yaml_file="${SUB_DIR}/clash.yaml"
@@ -794,7 +798,7 @@ _build_links() {
     reality-opts:
       public-key: %s
       short-id: "%s"
-' "$tag" "$ip" "$port" "$xuuid" "$xsni" "$xpath" "$xmode" "$xpbk" "$xsid" >> "$yaml_file"
+' "$(_yaml_q "$tag")" "$ip" "$port" "$xuuid" "$xsni" "$(_yaml_q "$xpath")" "$xmode" "$xpbk" "$xsid" >> "$yaml_file"
         ;;
       vless-reality)
         local uuid pbk sid sni
@@ -802,7 +806,7 @@ _build_links() {
         sid=$(jq -r '.short_id' <<<"$n"); sni=$(jq -r '.sni' <<<"$n")
         link="vless://${uuid}@${host}:${port}?encryption=none&flow=xtls-rprx-vision&security=reality&sni=${sni}&fp=chrome&pbk=${pbk}&sid=${sid}&type=tcp#${enc_name}"
         {
-          printf '  - name: "%s"\n    type: vless\n    server: "%s"\n    port: %s\n    uuid: %s\n    udp: true\n    tls: true\n    flow: xtls-rprx-vision\n    servername: %s\n    client-fingerprint: chrome\n    network: tcp\n    reality-opts:\n      public-key: %s\n      short-id: "%s"\n' "$tag" "$ip" "$port" "$uuid" "$sni" "$pbk" "$sid"
+          printf '  - name: "%s"\n    type: vless\n    server: "%s"\n    port: %s\n    uuid: %s\n    udp: true\n    tls: true\n    flow: xtls-rprx-vision\n    servername: %s\n    client-fingerprint: chrome\n    network: tcp\n    reality-opts:\n      public-key: %s\n      short-id: "%s"\n' "$(_yaml_q "$tag")" "$ip" "$port" "$uuid" "$sni" "$pbk" "$sid"
         } >> "$yaml_file"
         ;;
       vless-ws|vmess-ws)
@@ -822,12 +826,12 @@ _build_links() {
           # 不会从 host 推导 TLS 的 server_name, 缺 sni 会握手失败或落到证书不匹配
           # fp 统一 uTLS chrome, 与 Reality 系列节点保持一致, 避免 JA3/JA4 一眼看出是裸 TLS 客户端
           link="vless://${uuid}@${domain}:443?encryption=none&security=tls&sni=${domain}&fp=chrome&host=${domain}&type=ws&path=$(_url_encode "$path")#${enc_name}"
-          printf '  - name: "%s"\n    type: vless\n    server: "%s"\n    port: 443\n    uuid: %s\n    udp: true\n    tls: true\n    servername: %s\n    client-fingerprint: chrome\n    network: ws\n    ws-opts:\n      path: "%s"\n      headers:\n        Host: %s\n' "$tag" "$domain" "$uuid" "$domain" "$path" "$domain" >> "$yaml_file"
+          printf '  - name: "%s"\n    type: vless\n    server: "%s"\n    port: 443\n    uuid: %s\n    udp: true\n    tls: true\n    servername: %s\n    client-fingerprint: chrome\n    network: ws\n    ws-opts:\n      path: "%s"\n      headers:\n        Host: %s\n' "$(_yaml_q "$tag")" "$domain" "$uuid" "$domain" "$(_yaml_q "$path")" "$domain" >> "$yaml_file"
         else
           local vj
           vj=$(jq -cn --arg v "2" --arg u "$uuid" --arg d "$domain" --arg t "$tag" --arg p "$path" '{v:$v,ps:$t,add:$d,port:"443",id:$u,aid:"0",scy:"auto",net:"ws",type:"none",host:$d,path:$p,tls:"tls",sni:$d,fp:"chrome"}')
           link="vmess://$(_b64_nopad "$vj")"
-          printf '  - name: "%s"\n    type: vmess\n    server: "%s"\n    port: 443\n    uuid: %s\n    alterId: 0\n    cipher: auto\n    udp: true\n    tls: true\n    servername: %s\n    client-fingerprint: chrome\n    network: ws\n    ws-opts:\n      path: "%s"\n      headers:\n        Host: %s\n' "$tag" "$domain" "$uuid" "$domain" "$path" "$domain" >> "$yaml_file"
+          printf '  - name: "%s"\n    type: vmess\n    server: "%s"\n    port: 443\n    uuid: %s\n    alterId: 0\n    cipher: auto\n    udp: true\n    tls: true\n    servername: %s\n    client-fingerprint: chrome\n    network: ws\n    ws-opts:\n      path: "%s"\n      headers:\n        Host: %s\n' "$(_yaml_q "$tag")" "$domain" "$uuid" "$domain" "$(_yaml_q "$path")" "$domain" >> "$yaml_file"
         fi
         ;;
       hysteria2)
@@ -838,21 +842,21 @@ _build_links() {
         [ -n "$obfs" ] && link="${link}&obfs=salamander&obfs-password=${obfp}"
         link="${link}#${enc_name}"
         {
-          printf '  - name: "%s"\n    type: hysteria2\n    server: "%s"\n    port: %s\n    password: %s\n    sni: %s\n    skip-cert-verify: true\n' "$tag" "$ip" "$port" "$pass" "$sni"
-          [ -n "$obfs" ] && printf '    obfs: salamander\n    obfs-password: "%s"\n' "$obfp"
+          printf '  - name: "%s"\n    type: hysteria2\n    server: "%s"\n    port: %s\n    password: %s\n    sni: %s\n    skip-cert-verify: true\n' "$(_yaml_q "$tag")" "$ip" "$port" "$(_yaml_q "$pass")" "$sni"
+          [ -n "$obfs" ] && printf '    obfs: salamander\n    obfs-password: "%s"\n' "$(_yaml_q "$obfp")"
         } >> "$yaml_file"
         ;;
       tuic)
         local uuid pass sni
         uuid=$(jq -r '.uuid' <<<"$n"); pass=$(jq -r '.password' <<<"$n"); sni=$(jq -r '.sni' <<<"$n")
         link="tuic://${uuid}:${pass}@${host}:${port}?sni=${sni}&alpn=h3&congestion_control=bbr&udp_relay_mode=native&allow_insecure=1#${enc_name}"
-        printf '  - name: "%s"\n    type: tuic\n    server: "%s"\n    port: %s\n    uuid: %s\n    password: "%s"\n    sni: %s\n    skip-cert-verify: true\n    congestion-controller: bbr\n    alpn:\n      - h3\n    udp: true\n' "$tag" "$ip" "$port" "$uuid" "$pass" "$sni" >> "$yaml_file"
+        printf '  - name: "%s"\n    type: tuic\n    server: "%s"\n    port: %s\n    uuid: %s\n    password: "%s"\n    sni: %s\n    skip-cert-verify: true\n    congestion-controller: bbr\n    alpn:\n      - h3\n    udp: true\n' "$(_yaml_q "$tag")" "$ip" "$port" "$uuid" "$(_yaml_q "$pass")" "$sni" >> "$yaml_file"
         ;;
       anytls)
         local user pass sni
         user=$(jq -r '.username' <<<"$n"); pass=$(jq -r '.password' <<<"$n"); sni=$(jq -r '.sni' <<<"$n")
         link="anytls://${user}:${pass}@${host}:${port}?sni=${sni}&fp=chrome&insecure=1#${enc_name}"
-        printf '  - name: "%s"\n    type: anytls\n    server: "%s"\n    port: %s\n    username: \"%s\"\n    password: "%s"\n    sni: %s\n    client-fingerprint: chrome\n    skip-cert-verify: true\n' "$tag" "$ip" "$port" "$user" "$pass" "$sni" >> "$yaml_file"
+        printf '  - name: "%s"\n    type: anytls\n    server: "%s"\n    port: %s\n    username: \"%s\"\n    password: "%s"\n    sni: %s\n    client-fingerprint: chrome\n    skip-cert-verify: true\n' "$(_yaml_q "$tag")" "$ip" "$port" "$(_yaml_q "$user")" "$(_yaml_q "$pass")" "$sni" >> "$yaml_file"
         ;;
       mieru)
         local user pass transport
@@ -863,21 +867,21 @@ _build_links() {
         local rng port_line
         rng=$(jq -r '.port_range // empty' <<<"$n")
         if [ -n "$rng" ]; then port_line="port-range: \"${rng}\""; else port_line="port: ${port}"; fi
-        printf '  - name: "%s"\n    type: mieru\n    server: "%s"\n    %s\n    username: "%s"\n    password: "%s"\n    transport: %s\n' "$tag" "$ip" "$port_line" "$user" "$pass" "$transport" >> "$yaml_file"
+        printf '  - name: "%s"\n    type: mieru\n    server: "%s"\n    %s\n    username: "%s"\n    password: "%s"\n    transport: %s\n' "$(_yaml_q "$tag")" "$ip" "$port_line" "$(_yaml_q "$user")" "$(_yaml_q "$pass")" "$transport" >> "$yaml_file"
         ;;
       ss2022)
         local cipher pass userinfo
         cipher=$(jq -r '.cipher' <<<"$n"); pass=$(jq -r '.password' <<<"$n")
         userinfo=$(_b64_nopad "${cipher}:${pass}")
         link="ss://${userinfo}@${host}:${port}#${enc_name}"
-        printf '  - name: "%s"\n    type: ss\n    server: "%s"\n    port: %s\n    cipher: %s\n    password: "%s"\n    udp: true\n' "$tag" "$ip" "$port" "$cipher" "$pass" >> "$yaml_file"
+        printf '  - name: "%s"\n    type: ss\n    server: "%s"\n    port: %s\n    cipher: %s\n    password: "%s"\n    udp: true\n' "$(_yaml_q "$tag")" "$ip" "$port" "$cipher" "$(_yaml_q "$pass")" >> "$yaml_file"
         ;;
       trojan-reality)
         local pass pbk sid sni
         pass=$(jq -r '.password' <<<"$n"); pbk=$(jq -r '.public_key' <<<"$n")
         sid=$(jq -r '.short_id' <<<"$n"); sni=$(jq -r '.sni' <<<"$n")
         link="trojan://${pass}@${host}:${port}?security=reality&sni=${sni}&fp=chrome&pbk=${pbk}&sid=${sid}&type=tcp#${enc_name}"
-        printf '  - name: "%s"\n    type: trojan\n    server: "%s"\n    port: %s\n    password: "%s"\n    udp: true\n    sni: %s\n    client-fingerprint: chrome\n    reality-opts:\n      public-key: %s\n      short-id: "%s"\n' "$tag" "$ip" "$port" "$pass" "$sni" "$pbk" "$sid" >> "$yaml_file"
+        printf '  - name: "%s"\n    type: trojan\n    server: "%s"\n    port: %s\n    password: "%s"\n    udp: true\n    sni: %s\n    client-fingerprint: chrome\n    reality-opts:\n      public-key: %s\n      short-id: "%s"\n' "$(_yaml_q "$tag")" "$ip" "$port" "$(_yaml_q "$pass")" "$sni" "$pbk" "$sid" >> "$yaml_file"
         ;;
     esac
     [ -n "$link" ] && echo "$link" >> "$links_file"

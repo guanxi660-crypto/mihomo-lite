@@ -1,6 +1,6 @@
 # mihomo-lite
 
-> 版本：v1.5.26
+> 版本：v1.5.27
 >
 > **⚠️ 测试阶段（BETA）**：本项目当前处于测试阶段，功能与配置格式可能随时调整，请勿在生产环境使用。
 
@@ -33,11 +33,12 @@ mihomo 内核多协议服务端一键管理脚本，交互风格参考 [singbox-
 | Shadowsocks 2022 | blake3 三种加密，严格长度密钥校验 |
 | Trojan + Reality | 无需证书 |
 | VLESS / VMess + WS + Argo | 临时隧道（自动探测域名）或固定隧道（Token） |
+| **VLESS + XHTTP + TLS + Argo** ⭐ | XHTTP 拆成 HTTP 请求序列，抗探测更强；TLS 只在 CF 边缘终结，源站走明文（不能加 Reality）；默认 `packet-up` + padding；可与 WS 节点**共用同一条固定隧道**（新回源端口 + 新子域名） |
 
 ## 功能
 
 - 中文交互菜单：添加 / 删除 / **修改**节点、查看链接、重启 / 停止、状态、日志、卸载（Argo 节点不在节点修改列表里，统一走 **Argo 管理 → 3 修改**）
-- 8 种协议：XHTTP+Reality（首选）/ Reality+Vision / Hysteria2 / TUIC v5 / AnyTLS / Mieru / SS2022 / Trojan-Reality
+- 9 类协议：XHTTP+Reality（首选）/ Reality+Vision / Hysteria2 / TUIC v5 / AnyTLS / Mieru / SS2022 / Trojan-Reality，以及 Argo 隧道下的 WS / **XHTTP+TLS**
 - 节点默认命名「地区.运营商.协议」（点分隔、不带端口），可自定义覆盖；重名自动追加 `.2`/`.3`（客户端 proxies 不允许同名）
 - 修改节点时 Mieru 可在 **TCP / UDP** 之间在线切换，改完自动重建配置并重启
 - Mieru / AnyTLS 的用户名默认随机（`u` + 6 位十六进制），可自定义；修改节点时一并可改
@@ -71,6 +72,7 @@ mihomo 内核多协议服务端一键管理脚本，交互风格参考 [singbox-
 | Shadowsocks 2022 | `SG.Dromatics.SS2022` |
 | Argo + VLESS/WS | `SG.Dromatics.Argo` |
 | Argo + VMess/WS | `SG.Dromatics.Argo` |
+| Argo + VLESS/XHTTP | `SG.Dromatics.Argo.XHTTP` |
 
 规则细节：
 
@@ -105,6 +107,16 @@ Argo 传输协议: 1) http2 (TCP, 默认最稳)  2) quic (UDP, 家宽/弱网常�
 ```
 
 选择结果写入 `metadata.json` 的 `argo.protocol`，`run-argo.sh` **先跑选定的协议**；20 秒内退出（常见：机房封 UDP 7844，quic 直接连不上）会自动换另一条协议并在日志里写明，不会一声不响地躺着。要严格只用选定协议：`ARGO_NO_FALLBACK=1`。
+
+### VLESS + XHTTP + TLS（Argo）
+
+可选的第三种 Argo 节点：**VLESS + XHTTP + CF 边缘 TLS**。链路是 `客户端 --TLS(443)--> CF 边缘 --HTTP 明文--> cloudflared --回源端口--> mihomo`：
+
+- TLS 只能在 Cloudflare 边缘终结，**不能加 Reality**（Reality 要透传原始 TCP 的 TLS 握手，Argo 隧道是 HTTP 层转发，对穿不过去）；服务端 listener 带 `allow-insecure: true`，源站走明文 HTTP
+- XHTTP 的 `mode` 默认 `packet-up`（CF 会缓冲长连接，`stream-up` 的 SSE 下行容易被卡住）；`x-padding-bytes: 100-1000` 随机 padding
+- **固定隧道(Token)下可与现有 WS 节点共用同一条隧道**：不需要新建 cloudflared 进程。添加时选 XHTTP，会提示新回源端口（默认把现有端口 +1），你去 CF 面板给同一条隧道**新加一个子域名**（Type=HTTP，URL=`127.0.0.1:新端口`），新节点绑新域名。原有 WS 节点和隧道都不动
+- **临时隧道无法共用**（只能映射一个回源端口、没有子域名可加），现有临时隧道下选 XHTTP 会直接提示并取消；临时隧道适合只跑一个节点
+- cloudflared 侧的传输协议（http2/quic）与节点协议无关，沿用隧道配置
 
 ### 固定隧道（Token）
 

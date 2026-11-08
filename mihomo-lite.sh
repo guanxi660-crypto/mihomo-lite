@@ -17,7 +17,7 @@
 umask 077
 export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin${PATH:+:$PATH}"
 
-SCRIPT_VERSION="1.5.26"
+SCRIPT_VERSION="1.5.27"
 MIHOMO_DIR="/etc/mihomo-lite"
 MIHOMO_BIN="/usr/local/bin/mihomo"
 CLOUDFLARED_BIN="/usr/local/bin/cloudflared"
@@ -254,6 +254,7 @@ _proto_label() {
     trojan-reality) echo "Trojan.Reality" ;;
     vless-ws)       echo "Argo" ;;
     vmess-ws)       echo "Argo" ;;
+    vless-xhttp-argo) echo "Argo.XHTTP" ;;
     *)              echo "$1" ;;
   esac
 }
@@ -598,6 +599,28 @@ $( [ -n "$enc" ] && echo "        decryption: \"${enc}\"" )
         - "${sni}"
 EOF
       ;;
+    vless-xhttp-argo)
+      local uuid path xmode
+      uuid=$(jq -r '.uuid' <<<"$n"); path=$(jq -r '.ws_path' <<<"$n"); xmode=$(jq -r '.xhttp_mode // "packet-up"' <<<"$n")
+      # CF 边缘终结 TLS, 源站走明文 HTTP: 没有 reality/certificate, 因此必须 allow-insecure
+      # (vless 无 TLS 时内核要求此项, 否则拒绝启动)。绝不能加 reality-config:
+      # Reality 要透传原始 TCP 的 TLS 握手, Argo 隧道是 HTTP 层转发, 握手对不上。
+      cat <<EOF
+  - name: "${tag}"
+    type: vless
+    port: ${port}
+    listen: 127.0.0.1
+    udp: true
+    users:
+      - username: "u1"
+        uuid: "${uuid}"
+    xhttp-config:
+      path: "${path}"
+      mode: ${xmode}
+      x-padding-bytes: "100-1000"
+    allow-insecure: true
+EOF
+      ;;
     vless-ws)
       local uuid path
       uuid=$(jq -r '.uuid' <<<"$n"); path=$(jq -r '.ws_path' <<<"$n")
@@ -809,6 +832,33 @@ _build_links() {
           printf '  - name: "%s"\n    type: vless\n    server: "%s"\n    port: %s\n    uuid: %s\n    udp: true\n    tls: true\n    flow: xtls-rprx-vision\n    servername: %s\n    client-fingerprint: chrome\n    network: tcp\n    reality-opts:\n      public-key: %s\n      short-id: "%s"\n' "$(_yaml_q "$tag")" "$ip" "$port" "$uuid" "$sni" "$pbk" "$sid"
         } >> "$yaml_file"
         ;;
+      vless-xhttp-argo)
+        local uuid path domain xmode
+        uuid=$(jq -r '.uuid' <<<"$n"); path=$(jq -r '.ws_path' <<<"$n"); xmode=$(jq -r '.xhttp_mode // "packet-up"' <<<"$n")
+        domain=$(jq -r '.argo_domain // ""' <<<"$n")
+        [ -z "$domain" ] && domain=$(jq -r '.argo.domain // ""' "$METADATA_FILE" 2>/dev/null)
+        if [ -z "$domain" ]; then
+          _warn "Argo 节点 ${tag} 缺少隧道域名，已跳过（未写入链接与 clash.yaml）。"
+          _warn "修复：菜单【2 Argo 管理 → 3 修改】填好域名后会自动重建。"
+          continue
+        fi
+        # 隧道域名即 SNI: CF 边缘的 TLS 终结在此, 源站只看到明文, 不使用 Reality
+        link="vless://${uuid}@${domain}:443?encryption=none&security=tls&sni=${domain}&fp=chrome&host=${domain}&type=xhttp&path=$(_url_encode "$path")&mode=${xmode}#${enc_name}"
+        printf '  - name: "%s"
+    type: vless
+    server: "%s"
+    port: 443
+    uuid: %s
+    udp: true
+    tls: true
+    servername: %s
+    client-fingerprint: chrome
+    network: xhttp
+    xhttp-opts:
+      path: "%s"
+      mode: %s
+' "$(_yaml_q "$tag")" "$domain" "$uuid" "$domain" "$(_yaml_q "$path")" "$xmode" >> "$yaml_file"
+        ;;
       vless-ws|vmess-ws)
         local uuid path domain ws_proto
         uuid=$(jq -r '.uuid' <<<"$n"); path=$(jq -r '.ws_path' <<<"$n")
@@ -887,7 +937,7 @@ _build_links() {
     [ -n "$link" ] && echo "$link" >> "$links_file"
     # Argo 节点单独存一份, 方便在【Argo 管理 → 4】里只看到隧道节点的链接
     case "$proto" in
-      vless-ws|vmess-ws) [ -n "$link" ] && echo "$link" >> "$argo_file" ;;
+      vless-ws|vmess-ws|vless-xhttp-argo) [ -n "$link" ] && echo "$link" >> "$argo_file" ;;
     esac
   done
   chmod 600 "$links_file" "$yaml_file" 2>/dev/null
@@ -913,7 +963,7 @@ _show_links() {
   [ "${has_mieru:-0}" -gt 0 ] 2>/dev/null && _warn "Mieru 节点无通用分享链接，请直接使用 clash.yaml 中的配置。"
   # Argo 节点没有隧道域名时不会生成链接, 明确说清原因, 否则看起来像"节点根本不存在"
   local ws_count ws_domain
-  ws_count=$(jq '[.nodes[]? | select(.proto == "vless-ws" or .proto == "vmess-ws")] | length' "$METADATA_FILE" 2>/dev/null)
+  ws_count=$(jq '[.nodes[]? | select(.proto == "vless-ws" or .proto == "vmess-ws" or .proto == "vless-xhttp-argo")] | length' "$METADATA_FILE" 2>/dev/null)
   if [ "${ws_count:-0}" -gt 0 ] 2>/dev/null; then
     ws_domain=$(jq -r '.argo.domain // ""' "$METADATA_FILE" 2>/dev/null)
     if [ -z "$ws_domain" ]; then
@@ -1285,7 +1335,7 @@ _sync_temp_argo_domain() {
   done
   if [ -n "$d" ] && [ "$d" != "$old" ]; then
     jq --arg d "$d" '.argo.domain = $d
-      | .nodes |= map(if (.proto == "vless-ws" or .proto == "vmess-ws") then .argo_domain = $d else . end)'       "$METADATA_FILE" > "${METADATA_FILE}.tmp" && mv "${METADATA_FILE}.tmp" "$METADATA_FILE"
+      | .nodes |= map(if (.tag == $newtag) then .argo_domain = $d else . end)'       "$METADATA_FILE" > "${METADATA_FILE}.tmp" && mv "${METADATA_FILE}.tmp" "$METADATA_FILE"
     _warn "临时隧道域名已变更: ${old:-无} → ${d}（已同步节点与订阅）"
     _build_links >/dev/null 2>&1
   fi
@@ -1358,6 +1408,24 @@ _ask_transport() {
     *)     _warn "输入 '${t}' 无法识别，保留 ${cur}。"; ASK_TRANSPORT_RESULT="$cur" ;;
   esac
   _info "传输层: ${ASK_TRANSPORT_RESULT}"
+}
+
+# XHTTP 传输模式选择(结果存 ASK_XHTTP_MODE_RESULT); 默认值由调用方指定(Argo 下优先 packet-up:
+# CF 会缓冲长连接, stream-up 的 SSE 下行容易被卡住)
+_ask_xhttp_mode() {
+  local cur="${1:-packet-up}" t
+  echo "XHTTP 传输模式: 1) auto  2) packet-up  3) stream-up"
+  read -rp "选择 [${cur}]: " t || t=""
+  t=$(printf '%s' "${t%$'
+'}" | tr -d '[:space:]' | tr 'a-z' 'A-Z')
+  case "$t" in
+    1|AUTO)        ASK_XHTTP_MODE_RESULT="auto" ;;
+    2|PACKET-UP)   ASK_XHTTP_MODE_RESULT="packet-up" ;;
+    3|STREAM-UP)   ASK_XHTTP_MODE_RESULT="stream-up" ;;
+    "")            ASK_XHTTP_MODE_RESULT="$cur" ;;
+    *)             _warn "输入 '${t}' 无法识别，保留 ${cur}。"; ASK_XHTTP_MODE_RESULT="$cur" ;;
+  esac
+  _info "XHTTP 传输模式: ${ASK_XHTTP_MODE_RESULT}"
 }
 
 # [1] VLESS + XHTTP + Reality（首选：XHTTP 把流量拆成标准 HTTP 请求序列，抗主动探测强，可套 CDN）
@@ -1564,23 +1632,42 @@ _add_trojan_reality() {
 
 # 创建本机 WS 监听节点（Argo 回源用），供新隧道与复用已有隧道两条路径共用
 _create_argo_ws_listener() {
-  local proto
-  echo "1) VLESS + WS  2) VMess + WS"
-  read -rp "选择 Argo 节点协议 [1]: " c
-  [[ "$c" = "2" ]] && proto="vmess-ws" || proto="vless-ws"
+  local proto="${ASK_ARGO_PROTO:-}"
+  if [ -z "$proto" ]; then
+    echo "1) VLESS + WS  2) VMess + WS  3) VLESS + XHTTP【推荐】"
+    read -rp "选择 Argo 节点协议 [1]: " c
+    case "$c" in
+      2) proto="vmess-ws" ;;
+      3) proto="vless-xhttp-argo" ;;
+      *) proto="vless-ws" ;;
+    esac
+  fi
   local cur_port
   cur_port=$(jq -r 'if .argo.enabled == true then (.argo.port // "") else "" end' "$METADATA_FILE" 2>/dev/null)
-  _ask_port "本机 WS 监听端口 (Argo 回源端口, 仅 127.0.0.1)" "${cur_port:-8888}" "$cur_port" || return 1
+  # XHTTP 节点必须与已有 WS 节点用不同端口(同端口两个 listener 会 bind 冲突),
+  # 且要在 CF 面板新起一个子域名指向该端口, 才能和现有节点共用同一条隧道
+  local port_def="${cur_port:-8888}"
+  if [ "$proto" = "vless-xhttp-argo" ] && [ -n "$cur_port" ]; then
+    port_def=$((cur_port + 1))
+    _info "XHTTP 节点需使用与现有节点不同的回源端口, 默认 ${port_def}"
+  fi
+  _ask_port "本机监听端口 (Argo 回源端口, 仅 127.0.0.1)" "$port_def" "$cur_port" || return 1
   local port="$ASK_PORT_RESULT" uuid path
   uuid=$(_gen_uuid)
   path="/$(_gen_hex 8)"
+  local xmode=""
+  if [ "$proto" = "vless-xhttp-argo" ]; then
+    _ask_xhttp_mode "packet-up"
+    xmode="$ASK_XHTTP_MODE_RESULT"
+  fi
   # 复用外部 cloudflared 时协议由用户自己的隧道配置决定, 这里不问; WS 监听只在 127.0.0.1
   IP_VER="v4"
   _ask_node_name "$(_proto_label "$proto")"
   local node
   node=$(jq -cn --arg tag "argo-${port}" --arg name "$NODE_NAME" --arg port "$port" --arg ipver "$IP_VER" \
-    --arg proto "$proto" --arg uuid "$uuid" --arg path "$path" \
-    '{tag:$tag,name:$name,ip_ver:$ipver,proto:$proto,port:($port|tonumber),uuid:$uuid,ws_path:$path}')
+    --arg proto "$proto" --arg uuid "$uuid" --arg path "$path" --arg xmode "$xmode" \
+    '{tag:$tag,name:$name,ip_ver:$ipver,proto:$proto,port:($port|tonumber),uuid:$uuid,ws_path:$path}
+     + (if $proto == "vless-xhttp-argo" then {xhttp_mode:$xmode} else {} end)')
   _add_node_meta "$node"
   _regen_config; _restart_all
   CREATED_ARGO_PORT="$port"
@@ -1615,7 +1702,7 @@ _modify_node_menu() {
   # 不在这里改, 也不生成条目 —— 统一走【Argo 管理 → 3 修改】
   local map
   map=$(jq -r '.nodes | to_entries
-        | map(select(.value.proto != "vless-ws" and .value.proto != "vmess-ws"))
+        | map(select(.value.proto != "vless-ws" and .value.proto != "vmess-ws" and .value.proto != "vless-xhttp-argo"))
         | to_entries[]
         | "\(.key+1)\t\(.value.key)\t[\(.value.value.proto)] \(.value.value.name)\t\(.value.value.port_range // .value.value.port)"' "$METADATA_FILE")
   if [ -z "$map" ]; then
@@ -1809,7 +1896,7 @@ _modify_node_menu() {
 # ---------------- Argo 节点/隧道删除 ----------------
 _delete_argo_menu() {
   local ws_nodes
-  ws_nodes=$(jq -r '[.nodes[]? | select(.proto == "vless-ws" or .proto == "vmess-ws")] | length' "$METADATA_FILE")
+  ws_nodes=$(jq -r '[.nodes[]? | select(.proto == "vless-ws" or .proto == "vmess-ws" or .proto == "vless-xhttp-argo")] | length' "$METADATA_FILE")
   local argo_enabled
   argo_enabled=$(jq -r '.argo.enabled // false' "$METADATA_FILE")
   echo "当前 Argo 隧道: $([ "$argo_enabled" = "true" ] && echo "已配置 ($(jq -r '.argo.mode' "$METADATA_FILE") 模式, 域名: $(jq -r '.argo.domain // "未探测"' "$METADATA_FILE"))" || echo "无 (未由本脚本管理)")"
@@ -1828,7 +1915,7 @@ _delete_argo_menu() {
 
 _delete_argo_node() {
   local tags
-  tags=$(jq -r '.nodes[]? | select(.proto == "vless-ws" or .proto == "vmess-ws") | "\(.tag)\t\(.name)\t\(.port)"' "$METADATA_FILE")
+  tags=$(jq -r '.nodes[]? | select(.proto == "vless-ws" or .proto == "vmess-ws" or .proto == "vless-xhttp-argo") | "\(.tag)\t\(.name)\t\(.port)"' "$METADATA_FILE")
   [ -z "$tags" ] && { _warn "暂无 Argo 节点。"; return; }
   echo "当前 Argo 节点:"
   echo "$tags" | awk -F'\t' '{print "  " NR ") " $2 "  端口:" $3 "  (" $1 ")"}'
@@ -1842,7 +1929,7 @@ _delete_argo_node() {
   # 临时隧道只映射一个端口：删掉映射节点后隧道已无意义，询问是否一并清除
   if [ "$(jq -r '.argo.mode // ""' "$METADATA_FILE")" = "temp" ]; then
     local remaining
-    remaining=$(jq -r '[.nodes[]? | select(.proto == "vless-ws" or .proto == "vmess-ws")] | length' "$METADATA_FILE")
+    remaining=$(jq -r '[.nodes[]? | select(.proto == "vless-ws" or .proto == "vmess-ws" or .proto == "vless-xhttp-argo")] | length' "$METADATA_FILE")
     if [ "$remaining" = "0" ] || [ "$(jq -r '.argo.port // 0' "$METADATA_FILE")" = "$(jq -r --arg t "$tag" '.nodes[]? | select(.tag == $t) | .port // 0' "$METADATA_FILE" | head -1)" ]; then
       read -rp "临时隧道的映射节点已删除，是否同时停止并清除该隧道? [Y/n]: " s
       [[ "$s" =~ ^[Nn]$ ]] || _delete_argo_tunnel
@@ -1860,7 +1947,7 @@ _delete_argo_tunnel() {
   fi
   rm -f "${MIHOMO_DIR}/run-argo.sh" "${MIHOMO_DIR}/argo.pid"
   # 删除全部 Argo WS 节点
-  jq -r '.nodes[]? | select(.proto == "vless-ws" or .proto == "vmess-ws") | .tag' "$METADATA_FILE" | while read -r t; do _del_node_meta "$t"; done
+  jq -r '.nodes[]? | select(.proto == "vless-ws" or .proto == "vmess-ws" or .proto == "vless-xhttp-argo") | .tag' "$METADATA_FILE" | while read -r t; do _del_node_meta "$t"; done
   local tmp="${METADATA_FILE}.tmp"
   jq '.argo = {enabled:false}' "$METADATA_FILE" > "$tmp" && mv "$tmp" "$METADATA_FILE"
   : > "$ARGO_LOG" 2>/dev/null
@@ -1910,6 +1997,18 @@ _add_argo_node() {
     fi
     _info "将与已有隧道并行新建独立隧道 (cloudflared 多实例可共存)。"
   fi
+  # 先选协议再处理隧道: 临时隧道只能映射一个回源端口, XHTTP 节点无法与现有节点共用同一条临时隧道
+  # (token 隧道则可通过新起子域名+端口共用); 放在隧道判断前避免问完才发现走不通
+  local proto=""
+  echo "1) VLESS + WS  2) VMess + WS  3) VLESS + XHTTP【推荐】"
+  read -rp "选择 Argo 节点协议 [1]: " c
+  case "$c" in
+    2) proto="vmess-ws" ;;
+    3) proto="vless-xhttp-argo" ;;
+    *) proto="vless-ws" ;;
+  esac
+  ASK_ARGO_PROTO="$proto"
+
   if jq -e '.argo.enabled == true' "$METADATA_FILE" >/dev/null 2>&1; then
     if [ "$existing_mode" = "token" ]; then
       _success "检测到本机已有固定隧道 (域名: ${existing_domain:-未填写})，直接复用。"
@@ -1918,7 +2017,7 @@ _add_argo_node() {
       if [ "$port" = "$existing_port" ]; then
         # 同端口：直接沿用隧道已有域名
         local tmp="${METADATA_FILE}.tmp"
-        jq --arg d "$existing_domain" '.nodes |= map(if (.proto == "vless-ws" or .proto == "vmess-ws") then .argo_domain = $d else . end)' "$METADATA_FILE" > "$tmp" && mv "$tmp" "$METADATA_FILE"
+        jq --arg d "$existing_domain" '.nodes |= map(if (.proto == "vless-ws" or .proto == "vmess-ws" or .proto == "vless-xhttp-argo") then .argo_domain = $d else . end)' "$METADATA_FILE" > "$tmp" && mv "$tmp" "$METADATA_FILE"
         _build_links
       else
         _info "════ Cloudflare 面板操作指引 ════"
@@ -1937,20 +2036,28 @@ _add_argo_node() {
       return 0
     else
       _warn "检测到本机已有临时隧道 (域名: ${existing_domain:-探测中}，映射端口 ${existing_port})。"
+      if [ "$proto" = "vless-xhttp-argo" ]; then
+        _warn "临时隧道只能映射一个回源端口，XHTTP 节点不能挂到已有的 WS 节点上。"
+        _warn "想要「同一条隧道共用」，请从一开始就使用固定隧道(Token): 新节点用不同回源端口 + 新子域名。"
+        _warn "现有隧道与 WS 节点不会被动过。已取消。"
+        return 0
+      fi
       _warn "临时隧道只能映射一个回源端口，新增节点需要重建隧道（域名会变化）。"
       read -rp "是否重建临时隧道? [y/N]: " r
       [[ "$r" =~ ^[Yy]$ ]] || { _info "已取消。"; return 0; }
     fi
   fi
-  local proto mode token domain cur_port
-  echo "1) VLESS + WS  2) VMess + WS"
-  read -rp "选择 Argo 节点协议 [1]: " c
-  [[ "$c" = "2" ]] && proto="vmess-ws" || proto="vless-ws"
+  local mode token domain cur_port
   cur_port=$(jq -r 'if .argo.enabled == true then (.argo.port // "") else "" end' "$METADATA_FILE" 2>/dev/null)
   _ask_port "本机 WS 监听端口 (Argo 回源端口, 仅 127.0.0.1)" "${cur_port:-8888}" "$cur_port" || return 1
   local port="$ASK_PORT_RESULT" uuid path
   uuid=$(_gen_uuid)
   path="/$(_gen_hex 8)"
+  local xmode=""
+  if [ "$proto" = "vless-xhttp-argo" ]; then
+    _ask_xhttp_mode "packet-up"
+    xmode="$ASK_XHTTP_MODE_RESULT"
+  fi
   echo "1) 临时隧道 (trycloudflare.com, 域名随机)  2) 固定隧道 (Cloudflare Tunnel Token)"
   read -rp "选择隧道模式 [1]: " m
   # Argo 节点对外只走 Cloudflare 域名, 与本机对外 IP 版本无关; 这里问的是 cloudflared 的传输协议
@@ -1980,11 +2087,11 @@ _add_argo_node() {
     install_cloudflared || { _error "cloudflared 安装失败，Argo 无法启动。"; return 1; }
   fi
   # 删除旧的 argo 节点（一个隧道只挂一个 ws 节点）
-  jq -r '.nodes[]? | select(.proto == "vless-ws" or .proto == "vmess-ws") | .tag' "$METADATA_FILE" | while read -r t; do _del_node_meta "$t"; done
+  jq -r '.nodes[]? | select(.proto == "vless-ws" or .proto == "vmess-ws" or .proto == "vless-xhttp-argo") | .tag' "$METADATA_FILE" | while read -r t; do _del_node_meta "$t"; done
   local node
   node=$(jq -cn --arg tag "argo-${port}" --arg name "$NODE_NAME" --arg port "$port" \
-    --arg proto "$proto" --arg uuid "$uuid" --arg path "$path" --arg ipver "$IP_VER" --arg domain "$domain" \
-    '{tag:$tag,name:$name,ip_ver:$ipver,proto:$proto,port:($port|tonumber),uuid:$uuid,ws_path:$path,argo_domain:(if $domain == "" then null else $domain end)}')
+    --arg proto "$proto" --arg uuid "$uuid" --arg path "$path" --arg ipver "$IP_VER" --arg domain "$domain" --arg xmode "$xmode" \
+    '{tag:$tag,name:$name,ip_ver:$ipver,proto:$proto,port:($port|tonumber),uuid:$uuid,ws_path:$path,argo_domain:(if $domain == "" then null else $domain end)} + (if $proto == "vless-xhttp-argo" then {xhttp_mode:$xmode} else {} end)')
   _add_node_meta "$node"
   # 更新 argo 状态
   local tmp="${METADATA_FILE}.tmp"
@@ -2009,7 +2116,7 @@ _probe_temp_domain() {
   done
   if [ -n "$domain" ]; then
     local tmp="${METADATA_FILE}.tmp"
-    jq --arg d "$domain" '.argo.domain = $d | .nodes |= map(if (.proto == "vless-ws" or .proto == "vmess-ws") then .argo_domain = $d else . end)' "$METADATA_FILE" > "$tmp" && mv "$tmp" "$METADATA_FILE"
+    jq --arg d "$domain" '.argo.domain = $d | .nodes |= map(if (.proto == "vless-ws" or .proto == "vmess-ws" or .proto == "vless-xhttp-argo") then .argo_domain = $d else . end)' "$METADATA_FILE" > "$tmp" && mv "$tmp" "$METADATA_FILE"
     _success "临时隧道域名: ${domain}"
     _build_links
   else
@@ -2034,7 +2141,7 @@ _modify_argo_menu() {
   port=$(jq -r '.argo.port // 8888' "$METADATA_FILE")
   edge=$(jq -r '.argo.edge_ip // "auto"' "$METADATA_FILE")
   cur_proto=$(jq -r '.argo.protocol // "http2"' "$METADATA_FILE")
-  cur_name=$(jq -r '[.nodes[]? | select(.proto == "vless-ws" or .proto == "vmess-ws") | .name][0] // ""' "$METADATA_FILE")
+  cur_name=$(jq -r --arg t "argo-${port}" '[.nodes[]? | select(.tag == $t) | .name][0] // ""' "$METADATA_FILE")
 
   echo "当前 Argo 配置:"
   echo "  模式: ${mode}   回源端口: ${port}"
@@ -2051,7 +2158,7 @@ _modify_argo_menu() {
   [ -n "$v" ] && new_name="$v"
   if [ -n "$new_name" ] && [ "$new_name" != "$cur_name" ]; then
     local clash
-    clash=$(jq -r --arg nm "$new_name" '[.nodes[]? | select(.proto != "vless-ws" and .proto != "vmess-ws") | select(.name == $nm)] | length' "$METADATA_FILE" 2>/dev/null)
+    clash=$(jq -r --arg nm "$new_name" '[.nodes[]? | select(.proto != "vless-ws" and .proto != "vmess-ws" and .proto != "vless-xhttp-argo") | select(.name == $nm)] | length' "$METADATA_FILE" 2>/dev/null)
     if [ "${clash:-0}" -gt 0 ] 2>/dev/null; then
       _warn "名称 ${new_name} 已被其它节点使用，保留原名 ${cur_name}。"
       new_name="$cur_name"
@@ -2110,10 +2217,10 @@ _modify_argo_menu() {
         --arg oldtag "argo-${port}" --arg newtag "argo-${new_port}" \
         '.argo.port = $port | .argo.edge_ip = $edge | .argo.protocol = $proto
          | .nodes |= map(
-             if (.proto == "vless-ws" or .proto == "vmess-ws")
+             if (.tag == $oldtag)
              then .port = $port
                   | .name = (if $nm == "" then .name else $nm end)
-                  | .tag = (if .tag == $oldtag then $newtag else .tag end)
+                  | .tag = $newtag
              else . end)' "$METADATA_FILE" > "$tmp" && [ -s "$tmp" ]; then
     mv "$tmp" "$METADATA_FILE"
   else
@@ -2124,8 +2231,8 @@ _modify_argo_menu() {
   # 域名单独写, 空输入保留原值(临时隧道靠探测回填, 不能清空)
   if [ -n "$new_domain" ] && [ "$new_domain" != "$domain" ]; then
     tmp="${METADATA_FILE}.tmp"
-    jq --arg d "$new_domain" '.argo.domain = $d
-       | .nodes |= map(if (.proto == "vless-ws" or .proto == "vmess-ws") then .argo_domain = $d else . end)' \
+    jq --arg d "$new_domain" --arg newtag "argo-${new_port}" '.argo.domain = $d
+       | .nodes |= map(if (.tag == $newtag) then .argo_domain = $d else . end)' \
        "$METADATA_FILE" > "$tmp" && mv "$tmp" "$METADATA_FILE"
   fi
 
@@ -2159,7 +2266,7 @@ _show_argo_overview() {
   domain=$(jq -r '.argo.domain // ""' "$METADATA_FILE")
   proto=$(jq -r '.argo.protocol // "http2→quic 回退"' "$METADATA_FILE")
   edge=$(jq -r '.argo.edge_ip // "auto"' "$METADATA_FILE")
-  ws_count=$(jq -r '[.nodes[]? | select(.proto == "vless-ws" or .proto == "vmess-ws")] | length' "$METADATA_FILE")
+  ws_count=$(jq -r '[.nodes[]? | select(.proto == "vless-ws" or .proto == "vmess-ws" or .proto == "vless-xhttp-argo")] | length' "$METADATA_FILE")
 
   echo ""
   echo -e "${CYAN}================ Argo 隧道 ================${NC}"
@@ -2174,7 +2281,7 @@ _show_argo_overview() {
   echo "  WS 节点数: ${ws_count}"
   echo ""
   echo "  节点:"
-  jq -r '.nodes[]? | select(.proto == "vless-ws" or .proto == "vmess-ws")
+  jq -r '.nodes[]? | select(.proto == "vless-ws" or .proto == "vmess-ws" or .proto == "vless-xhttp-argo")
          | "   - [\(.proto)] \(.name)  回源 127.0.0.1:\(.port)  域名:\(.argo_domain // "未绑定")"' "$METADATA_FILE"
   echo ""
   echo -e "${CYAN}================ Argo 节点链接 ================${NC}"

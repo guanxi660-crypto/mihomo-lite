@@ -33,7 +33,7 @@ mihomo 内核多协议服务端一键管理脚本，交互风格参考 [singbox-
 | Shadowsocks 2022 | blake3 三种加密，严格长度密钥校验 |
 | Trojan + Reality | 无需证书 |
 | VLESS / VMess + WS + Argo | 临时隧道（自动探测域名）或固定隧道（Token） |
-| **VLESS + XHTTP + TLS + Argo** ⭐ | XHTTP 拆成 HTTP 请求序列，抗探测更强；TLS 只在 CF 边缘终结，源站走明文（不能加 Reality）；默认 `packet-up` + padding；可与 WS 节点**共用同一条固定隧道**（新回源端口 + 新子域名） |
+| **VLESS + XHTTP + TLS + Argo** | XHTTP 拆成 HTTP 请求序列，抗探测更强；TLS 只在 CF 边缘终结，源站走明文（不能加 Reality）；默认 `packet-up` + padding；可与 WS 节点**共用同一条固定隧道**（新回源端口 + 新子域名） |
 
 ## 功能
 

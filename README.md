@@ -4,7 +4,7 @@
 >
 > **⚠️ 测试阶段（BETA）**：本项目当前处于测试阶段，功能与配置格式可能随时调整，请勿在生产环境使用。
 
-mihomo 内核多协议服务端一键管理脚本，交互风格参考 [singbox-lite](https://github.com/0xdabiaoge/singbox-lite)。
+mihomo 内核多协议服务端一键管理脚本。
 
 ## 🚀 一键安装
 
@@ -123,7 +123,7 @@ Argo 传输协议: 1) http2 (TCP, 默认最稳)  2) quic (UDP, 家宽/弱网常�
 
 ### 选型
 
-本次新增 **Argo XHTTP** 节点：链路与 WS 节点相同（经 CF 边缘 TLS 终结），实测可用，但物理上多一跳 CF，延迟比直连 TCP+TLS 高一截。两个可以共存、按场景切换。
+**Argo XHTTP** 节点与 WS 节点链路相同（经 CF 边缘 TLS 终结），实测可用，但物理上多一跳 CF，延迟比直连 TCP+TLS 高一截。两个可以共存、按场景切换。
 
 ### 固定隧道（Token）
 

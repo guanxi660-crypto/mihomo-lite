@@ -1,7 +1,6 @@
 #!/bin/bash
 #=============================================================================
 # mihomo-lite —— mihomo 内核多协议服务端一键管理脚本
-# 交互风格参考 singbox-lite (0xdabiaoge/singbox-lite)
 # 节点能力（均基于 mihomo listeners 服务端入站，字段已按 mihomo 官方 wiki 核实）：
 #   1. VLESS + TCP + Reality + Vision (可选 VLESS Encryption 后量子加密)
 #   2. Hysteria2 (Salamander 混淆)

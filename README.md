@@ -102,7 +102,7 @@ SNI_DEFAULT=aws.amazon.com bash mihomo-lite.sh
 
 ## Argo 隧道
 
-添加 Argo 节点时会问 cloudflared 的传输协议（不再问本机对外 IP 版本——Argo 对外只走 Cloudflare 域名，问 IP 没有意义）：
+添加 Argo 节点时只问 cloudflared 的传输协议（Argo 对外走 Cloudflare 域名，不问本机 IP 版本）：
 
 ```
 Argo 传输协议: 1) http2 (TCP, 默认最稳)  2) quic (UDP, 家宽/弱网常更顺)
@@ -110,6 +110,16 @@ Argo 传输协议: 1) http2 (TCP, 默认最稳)  2) quic (UDP, 家宽/弱网常�
 ```
 
 选择结果写入 `metadata.json` 的 `argo.protocol`，`run-argo.sh` **先跑选定的协议**；20 秒内退出（常见：机房封 UDP 7844，quic 直接连不上）会自动换另一条协议并在日志里写明，不会一声不响地躺着。要严格只用选定协议：`ARGO_NO_FALLBACK=1`。
+
+### 复用本机已有的 cloudflared
+
+- **二进制复用**：核心安装不带 cloudflared；添加 Argo 节点时才找它，`/usr/local/bin`、`/usr/bin`、`PATH` 里任何已有的直接复用，不重新下载、不覆盖
+- **隧道复用**：本机已有隧道在跑（systemd 服务 `cloudflared`、`/etc/cloudflared/config.yml` 或 `/etc/cloudflared/token`、其他独立 cloudflared 进程）时，添加节点会先提示并让你二选一：
+  - `1) 复用已有隧道` —— 只在本机加 WS/XHTTP 监听（127.0.0.1），你去 CF 面板给这条隧道**新加一个 Public Hostname**（Type=HTTP，URL=`127.0.0.1:回源端口`），填回域名即生成链接；原有隧道的配置和流量都不动
+  - `2) 新建隧道` —— 并行起一条由本脚本管理的独立隧道（cloudflared 多实例可共存），已有隧道不受影响
+
+  检测按进程 PID 认自己人，不按文件痕迹一刀切，所以卸载残留的 service 单元不会让外部隧道被误判跳过
+- **卸载不动它**：卸载脚本只清理本脚本创建的隧道与服务，系统里原有的 cloudflared 与它的隧道原样保留
 
 ### VLESS + XHTTP + TLS（Argo）
 

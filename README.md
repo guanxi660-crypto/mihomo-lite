@@ -1,6 +1,6 @@
 # mihomo-lite
 
-> 版本：v1.5.27
+> 版本：v1.5.28
 >
 > **⚠️ 测试阶段（BETA）**：本项目当前处于测试阶段，功能与配置格式可能随时调整，请勿在生产环境使用。
 
@@ -32,13 +32,14 @@ mihomo 内核多协议服务端一键管理脚本，交互风格参考 [singbox-
 | Mieru | TCP/UDP 自研加密，**用户名/密码均随机生成可自定义**，支持**单端口或端口段**（端口跳跃，客户端每条连接随机挑）；无通用分享链接，输出 clash.yaml |
 | Shadowsocks 2022 | blake3 三种加密，严格长度密钥校验 |
 | Trojan + Reality | 无需证书 |
+| Snell | v4 / v5 / v6 可选；v4/v5 支持 `http`/`tls` 混淆，v6 无混淆层、用 PSK 派生流量整形（`mode` 须与客户端一致，需内核 ≥ 1.19.34）；无通用分享链接，输出 clash.yaml + `surge-snell.txt` |
 | VLESS / VMess + WS + Argo | 临时隧道（自动探测域名）或固定隧道（Token） |
 | **VLESS + XHTTP + TLS + Argo** | XHTTP 拆成 HTTP 请求序列，抗探测更强；TLS 只在 CF 边缘终结，为迎合用户需要添加本人不推；默认 `packet-up` + padding；可与 WS 节点**共用同一条固定隧道**（新回源端口 + 新子域名） |
 
 ## 功能
 
 - 中文交互菜单：添加 / 删除 / **修改**节点、查看链接、重启 / 停止、状态、日志、卸载（Argo 节点不在节点修改列表里，统一走 **Argo 管理 → 3 修改**）
-- 9 类协议：XHTTP+Reality（首选）/ Reality+Vision / Hysteria2 / TUIC v5 / AnyTLS / Mieru / SS2022 / Trojan-Reality，以及 Argo 隧道下的 WS / **XHTTP+TLS**
+- 10 类协议：XHTTP+Reality（首选）/ Reality+Vision / Hysteria2 / TUIC v5 / AnyTLS / Mieru / SS2022 / Trojan-Reality / Snell(v4/v5/v6)，以及 Argo 隧道下的 WS / **XHTTP+TLS**
 - 节点默认命名「地区.运营商.协议」（点分隔、不带端口），可自定义覆盖；重名自动追加 `.2`/`.3`（客户端 proxies 不允许同名）
 - 修改节点时 Mieru 可在 **TCP / UDP** 之间在线切换，改完自动重建配置并重启
 - Mieru / AnyTLS 的用户名默认随机（`u` + 6 位十六进制），可自定义；修改节点时一并可改
@@ -55,6 +56,7 @@ mihomo 内核多协议服务端一键管理脚本，交互风格参考 [singbox-
 - 支持 systemd / OpenRC / 无 init 直跑三种模式
 - 重启前 `mihomo -t` 配置校验 + 启动后存活兜底检查
 - SS2022 严格长度密钥校验（避免运行期 `decode psk` 错误）
+- Snell 版本自选：v4（客户端兼容面最广，默认）/ v5 / v6；v6 添加时自动校验内核 ≥ 1.19.34、PSK 长度 12-255 字节并询问 `mode`（default/unshaped/unsafe-raw）
 
 ## 节点命名
 
@@ -70,6 +72,7 @@ mihomo 内核多协议服务端一键管理脚本，交互风格参考 [singbox-
 | AnyTLS | `SG.Dromatics.AnyTls` |
 | Mieru | `SG.Dromatics.Mieru` |
 | Shadowsocks 2022 | `SG.Dromatics.SS2022` |
+| Snell | `SG.Dromatics.Snell` |
 | Argo + VLESS/WS | `SG.Dromatics.Argo` |
 | Argo + VMess/WS | `SG.Dromatics.Argo` |
 | Argo + VLESS/XHTTP | `SG.Dromatics.Argo.XHTTP` |

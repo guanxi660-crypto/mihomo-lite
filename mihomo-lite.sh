@@ -17,7 +17,7 @@
 umask 077
 export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin${PATH:+:$PATH}"
 
-SCRIPT_VERSION="1.5.27"
+SCRIPT_VERSION="1.5.28"
 MIHOMO_DIR="/etc/mihomo-lite"
 MIHOMO_BIN="/usr/local/bin/mihomo"
 CLOUDFLARED_BIN="/usr/local/bin/cloudflared"
@@ -252,6 +252,7 @@ _proto_label() {
     mieru)          echo "Mieru" ;;
     ss2022)         echo "SS2022" ;;
     trojan-reality) echo "Trojan.Reality" ;;
+    snell)          echo "Snell" ;;
     vless-ws)       echo "Argo" ;;
     vmess-ws)       echo "Argo" ;;
     vless-xhttp-argo) echo "Argo.XHTTP" ;;
@@ -740,6 +741,24 @@ EOF
     udp: true
 EOF
       ;;
+    snell)
+      local psk ver v6mode obfs obfshost
+      psk=$(jq -r '.psk' <<<"$n"); ver=$(jq -r '.version // 4' <<<"$n")
+      v6mode=$(jq -r '.v6_mode // ""' <<<"$n")
+      obfs=$(jq -r '.obfs // ""' <<<"$n"); obfshost=$(jq -r '.obfs_host // ""' <<<"$n")
+      # v6 与 obfs 互斥(内核直接报错), v6 用 PSK 派生的流量整形 + mode
+      cat <<EOF
+  - name: "${tag}"
+    type: snell
+    port: ${port}
+    listen: ${LISTEN_ADDR}
+    psk: "${psk}"
+    version: ${ver}
+    udp: true
+$( [ -n "$v6mode" ] && printf '    mode: %s\n' "$v6mode" )
+$( [ -n "$obfs" ] && printf '    obfs-opts:\n      mode: %s\n      host: %s\n' "$obfs" "$obfshost" )
+EOF
+      ;;
     trojan-reality)
       local pass pk sid sni
       pass=$(jq -r '.password' <<<"$n"); pk=$(jq -r '.private_key' <<<"$n")
@@ -773,8 +792,8 @@ _yaml_q() { printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g'; }
 _build_links() {
   local ip; ip=$(_get_public_ip)
   local links_file="${SUB_DIR}/links.txt" yaml_file="${SUB_DIR}/clash.yaml"
-  local argo_file="${SUB_DIR}/argo.txt"
-  : > "$links_file"; : > "$argo_file"
+  local argo_file="${SUB_DIR}/argo.txt" surge_file="${SUB_DIR}/surge-snell.txt"
+  : > "$links_file"; : > "$argo_file"; : > "$surge_file"
   {
     echo "# mihomo-lite 客户端配置（Clash/Mihomo 格式）自动生成"
     echo "# 若节点使用 IPv6 地址，客户端顶层需要 ipv6: true 才能连通"
@@ -926,6 +945,25 @@ _build_links() {
         link="ss://${userinfo}@${host}:${port}#${enc_name}"
         printf '  - name: "%s"\n    type: ss\n    server: "%s"\n    port: %s\n    cipher: %s\n    password: "%s"\n    udp: true\n' "$(_yaml_q "$tag")" "$ip" "$port" "$cipher" "$(_yaml_q "$pass")" >> "$yaml_file"
         ;;
+      snell)
+        local psk ver v6mode obfs obfshost
+        psk=$(jq -r '.psk' <<<"$n"); ver=$(jq -r '.version // 4' <<<"$n")
+        v6mode=$(jq -r '.v6_mode // ""' <<<"$n")
+        obfs=$(jq -r '.obfs // ""' <<<"$n"); obfshost=$(jq -r '.obfs_host // ""' <<<"$n")
+        # Snell 没有通用分享链接规范(mihomo 也不解析 snell://), 只输出客户端配置:
+        # Clash 系 → clash.yaml; Surge → surge-snell.txt (v6 的实际受众主要是 Surge)
+        {
+          printf '  - name: "%s"\n    type: snell\n    server: "%s"\n    port: %s\n    psk: "%s"\n    version: %s\n    udp: true\n' "$(_yaml_q "$tag")" "$ip" "$port" "$(_yaml_q "$psk")" "$ver"
+          [ -n "$v6mode" ] && printf '    mode: %s\n' "$v6mode"
+          [ -n "$obfs" ] && printf '    obfs-opts:\n      mode: %s\n      host: %s\n' "$obfs" "$obfshost"
+        } >> "$yaml_file"
+        {
+          printf '%s = snell, %s, %s, psk=%s, version=%s' "$tag" "$host" "$port" "$psk" "$ver"
+          [ -n "$v6mode" ] && printf ', mode=%s' "$v6mode"
+          [ -n "$obfs" ] && printf ', obfs=%s, obfs-host=%s' "$obfs" "$obfshost"
+          printf '\n'
+        } >> "$surge_file"
+        ;;
       trojan-reality)
         local pass pbk sid sni
         pass=$(jq -r '.password' <<<"$n"); pbk=$(jq -r '.public_key' <<<"$n")
@@ -940,7 +978,7 @@ _build_links() {
       vless-ws|vmess-ws|vless-xhttp-argo) [ -n "$link" ] && echo "$link" >> "$argo_file" ;;
     esac
   done
-  chmod 600 "$links_file" "$yaml_file" 2>/dev/null
+  chmod 600 "$links_file" "$yaml_file" "$surge_file" 2>/dev/null
 }
 
 _show_links() {
@@ -957,6 +995,9 @@ _show_links() {
   echo -e "${CYAN}=============================================================${NC}"
   echo "分享链接文件: ${SUB_DIR}/links.txt"
   echo "Clash/Mihomo 客户端配置: ${SUB_DIR}/clash.yaml"
+  if jq -e '[.nodes[]? | select(.proto == "snell")] | length > 0' "$METADATA_FILE" >/dev/null 2>&1; then
+    _info "Snell 节点无通用分享链接，客户端配置见 clash.yaml；Surge 用户可直接取 ${SUB_DIR}/surge-snell.txt 里的配置行。"
+  fi
   # mieru 节点只有 yaml 配置，没有分享链接，做一次提示
   local has_mieru
   has_mieru=$(jq '[.nodes[]? | select(.proto == "mieru")] | length' "$METADATA_FILE" 2>/dev/null)
@@ -997,6 +1038,27 @@ _fetch_gh() {
   rm -f "$out"
   _fetch "${mirror}${url}" "$out" 2>/dev/null
   gzip -t "$out" 2>/dev/null
+}
+
+# 内核版本号(纯数字形如 1.19.34), 读不出返回空
+_core_version() {
+  [ -x "$MIHOMO_BIN" ] || return 1
+  "${MIHOMO_BIN}" -v 2>/dev/null | head -n1 | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -n1
+}
+
+# 当前内核是否 >= 指定版本($1 形如 1.19.34); 用 awk 比较, busybox sort 没有 -V
+_core_at_least() {
+  local cur
+  cur=$(_core_version)
+  [ -z "$cur" ] && return 1
+  awk -v a="$1" -v b="$cur" 'BEGIN{
+    na = split(a, x, "."); nb = split(b, y, ".")
+    for (i = 1; i <= 3; i++) {
+      if ((y[i] + 0) > (x[i] + 0)) exit 0
+      if ((y[i] + 0) < (x[i] + 0)) exit 1
+    }
+    exit 0
+  }'
 }
 
 # 确保 mihomo 核心已安装(任何"要写 listener"的操作前调用)
@@ -1335,7 +1397,7 @@ _sync_temp_argo_domain() {
   done
   if [ -n "$d" ] && [ "$d" != "$old" ]; then
     jq --arg d "$d" '.argo.domain = $d
-      | .nodes |= map(if (.tag == $newtag) then .argo_domain = $d else . end)'       "$METADATA_FILE" > "${METADATA_FILE}.tmp" && mv "${METADATA_FILE}.tmp" "$METADATA_FILE"
+      | .nodes |= map(if (.proto == "vless-ws" or .proto == "vmess-ws" or .proto == "vless-xhttp-argo") then .argo_domain = $d else . end)'       "$METADATA_FILE" > "${METADATA_FILE}.tmp" && mv "${METADATA_FILE}.tmp" "$METADATA_FILE"
     _warn "临时隧道域名已变更: ${old:-无} → ${d}（已同步节点与订阅）"
     _build_links >/dev/null 2>&1
   fi
@@ -1601,6 +1663,72 @@ _add_ss2022() {
   _regen_config; _restart_all; _show_links
 }
 
+# [9] Snell
+# v4/v5 客户端面最广(Clash/mihomo 全系、Surfboard 等多半只到 v4/v5);
+# v6 是 Surge 的新协议版本(PSK 派生流量整形, 无 obfs 层), 服务端需内核 >= 1.19.34
+# (mihomo v1.19.34 才加入 snell v6 inbound/outbound)
+_add_snell() {
+  _ask_port "请输入 Snell 端口" rand || return 1
+  local port="$ASK_PORT_RESULT" ver psk mode="" obfs="" obfshost=""
+  echo "Snell 版本: 1) v4 (兼容面最广)  2) v5  3) v6 (仅 Surge 与 mihomo >= 1.19.34)"
+  read -rp "选择 [1]: " v
+  case "$v" in
+    2|5|V5) ver=5 ;;
+    3|6|V6) ver=6 ;;
+    *)      ver=4 ;;
+  esac
+  if [ "$ver" = "6" ]; then
+    if ! _core_at_least 1.19.34; then
+      _error "当前内核版本 $(_core_version || echo '未知') 不支持 Snell v6，需要 >= 1.19.34。"
+      _info "请先执行菜单【11 安装/更新 mihomo 核心】升级内核，或重新添加时选 v4/v5。"
+      return 1
+    fi
+    psk=$(_gen_hex 16)   # 32 字节, 满足 v6 的 12-255 字节要求
+    read -rp "预共享密钥 PSK (12-255 字节) [${psk}]: " ps; psk="${ps:-$psk}"
+    local plen
+    plen=$(printf '%s' "$psk" | wc -c)
+    if [ "$plen" -lt 12 ] || [ "$plen" -gt 255 ]; then
+      _error "PSK 长度 ${plen} 字节，Snell v6 要求 12-255 字节，已取消。"
+      return 1
+    fi
+    # v6 用 PSK 派生的流量整形替代 simple-obfs, 没有 obfs 选项, 但 mode 必须与客户端一致
+    echo "流量整形模式 (必须与客户端一致): 1) default  2) unshaped  3) unsafe-raw"
+    read -rp "选择 [1]: " m
+    m=$(printf '%s' "${m%$'\r'}" | tr -d '[:space:]' | tr 'a-z' 'A-Z')
+    case "$m" in
+      2|UNSHAPED)   mode="unshaped" ;;
+      3|UNSAFE-RAW) mode="unsafe-raw" ;;
+      *)            mode="default" ;;
+    esac
+    _info "v6 模式: ${mode}（客户端需填同样值）"
+  else
+    psk=$(_gen_hex 16)
+    read -rp "预共享密钥 PSK [${psk}]: " ps; psk="${ps:-$psk}"
+    echo "混淆 (v4/v5 可选, v6 不支持): 1) 无  2) http  3) tls"
+    read -rp "选择 [1]: " o
+    o=$(printf '%s' "${o%$'\r'}" | tr -d '[:space:]' | tr 'a-z' 'A-Z')
+    case "$o" in
+      2|HTTP) obfs="http" ;;
+      3|TLS)  obfs="tls" ;;
+      *)      obfs="" ;;
+    esac
+    if [ -n "$obfs" ]; then
+      obfshost=$(_pick_sni)
+      read -rp "混淆伪装域名 [${obfshost}]: " oh; obfshost="${oh:-$obfshost}"
+    fi
+  fi
+  _ask_ip_ver
+  _ask_node_name "$(_proto_label snell)"
+  local node
+  node=$(jq -cn --arg tag "snell-${port}" --arg name "$NODE_NAME" --arg port "$port" --arg ipver "$IP_VER" \
+    --argjson ver "$ver" --arg psk "$psk" --arg mode "$mode" --arg obfs "$obfs" --arg obfshost "$obfshost" \
+    '{tag:$tag,name:$name,ip_ver:$ipver,proto:"snell",port:($port|tonumber),version:$ver,psk:$psk,udp:true}
+     + (if $mode == "" then {} else {v6_mode:$mode} end)
+     + (if $obfs == "" then {} else {obfs:$obfs,obfs_host:$obfshost} end)')
+  _add_node_meta "$node"
+  _regen_config; _restart_all; _show_links
+}
+
 # [7] Trojan + Reality
 _add_trojan_reality() {
   _ask_port "请输入 Trojan-Reality 端口" rand || return 1
@@ -1757,7 +1885,7 @@ _modify_node_menu() {
   esac
 
   # 需要更新的值(默认=原值)与对应的 jq filter 片段
-  local sni uuid pass obfp path domain transport range
+  local sni uuid pass obfp path domain transport range psk sv6mode
   local filter=""
   case "$proto" in
     vless-xhttp)
@@ -1838,6 +1966,34 @@ _modify_node_menu() {
       [ "$dlen" = "$len" ] || { _error "密码不是合法 base64 或长度不等于 ${len} 字节，未做修改。"; return 1; }
       filter=' | .password = $pass'
       ;;
+    snell)
+      psk=$(jq -r --argjson i "$idx" '.nodes[$i].psk // ""' "$METADATA_FILE")
+      local sver sv6mode
+      sver=$(jq -r --argjson i "$idx" '.nodes[$i].version // 4' "$METADATA_FILE")
+      sv6mode=$(jq -r --argjson i "$idx" '.nodes[$i].v6_mode // ""' "$METADATA_FILE")
+      read -rp "预共享密钥 PSK [${psk}]: " v; psk="${v:-$psk}"
+      if [ "$sver" = "6" ]; then
+        # v6 只要求 12-255 字节, 且没有 obfs; mode 与客户端一致才连得上
+        local plen
+        plen=$(printf '%s' "$psk" | wc -c)
+        if [ "$plen" -lt 12 ] || [ "$plen" -gt 255 ]; then
+          _error "PSK 长度 ${plen} 字节，Snell v6 要求 12-255 字节，未做修改。"
+          return 1
+        fi
+        echo "流量整形模式: 1) default  2) unshaped  3) unsafe-raw"
+        read -rp "选择 [${sv6mode:-default}]: " v
+        v=$(printf '%s' "${v%$'\r'}" | tr -d '[:space:]' | tr 'a-z' 'A-Z')
+        case "$v" in
+          2|UNSHAPED)   sv6mode="unshaped" ;;
+          3|UNSAFE-RAW) sv6mode="unsafe-raw" ;;
+          1|DEFAULT)    sv6mode="default" ;;
+          "")           sv6mode="${sv6mode:-default}" ;;
+        esac
+        filter=' | .psk = $psk | .v6_mode = $sv6mode'
+      else
+        filter=' | .psk = $psk'
+      fi
+      ;;
     trojan-reality)
       pass=$(jq -r --argjson i "$idx" '.nodes[$i].password // ""' "$METADATA_FILE")
       sni=$(jq -r --argjson i "$idx" '.nodes[$i].sni // ""' "$METADATA_FILE")
@@ -1880,6 +2036,8 @@ _modify_node_menu() {
         --arg domain "${domain:-}" \
         --arg transport "${transport:-}" \
         --arg range "${range:-}" \
+        --arg psk "${psk:-}" \
+        --arg sv6mode "${sv6mode:-}" \
         ".nodes[\$i] |= (.name = \$name | .port = \$port | .tag = \$tag | .ip_ver = \$ipver${filter})" \
         "$METADATA_FILE" > "$tmp" && [ -s "$tmp" ]; then
     mv "$tmp" "$METADATA_FILE"
@@ -2466,7 +2624,7 @@ _menu_status() {
 _show_menu() {
   echo ""
   echo -e "${GREEN}======== mihomo-lite 管理脚本 v${SCRIPT_VERSION} ========${NC}"
-  echo " 1. 添加节点 (XHTTP-Reality/Reality/HY2/TUIC/AnyTLS/Mieru/SS2022/Trojan)"
+  echo " 1. 添加节点 (XHTTP-Reality/Reality/HY2/TUIC/AnyTLS/Mieru/SS2022/Trojan/Snell)"
   echo " 2. Argo 隧道管理 (添加/删除/修改节点与隧道, 传输协议 http2/quic 可选)"
   echo " 3. 查看节点链接"
   echo " 4. 删除节点"
@@ -2509,13 +2667,14 @@ _main_menu() {
         echo " 6) Mieru"
         echo " 7) SS2022"
         echo " 8) Trojan+Reality"
+        echo " 9) Snell (v4/v5/v6, 客户端需支持)"
         echo " 0) 返回"
         read -rp "协议: " p
         case "$p" in
           1) _add_vless_xhttp ;; 2) _add_vless_reality ;;
           3) _add_hysteria2 ;; 4) _add_tuic ;;
           5) _add_anytls ;; 6) _add_mieru ;; 7) _add_ss2022 ;;
-          8) _add_trojan_reality ;;
+          8) _add_trojan_reality ;; 9) _add_snell ;;
           0) ;;
           *) _error "无效输入。" ;;
         esac

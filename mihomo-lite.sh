@@ -16,7 +16,7 @@
 umask 077
 export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin${PATH:+:$PATH}"
 
-SCRIPT_VERSION="1.5.28"
+SCRIPT_VERSION="1.5.29"
 MIHOMO_DIR="/etc/mihomo-lite"
 MIHOMO_BIN="/usr/local/bin/mihomo"
 CLOUDFLARED_BIN="/usr/local/bin/cloudflared"
@@ -791,8 +791,8 @@ _yaml_q() { printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g'; }
 _build_links() {
   local ip; ip=$(_get_public_ip)
   local links_file="${SUB_DIR}/links.txt" yaml_file="${SUB_DIR}/clash.yaml"
-  local argo_file="${SUB_DIR}/argo.txt"
-  : > "$links_file"; : > "$argo_file"
+  local argo_file="${SUB_DIR}/argo.txt" surge_file="${SUB_DIR}/surge-snell.txt"
+  : > "$links_file"; : > "$argo_file"; : > "$surge_file"
   {
     echo "# mihomo-lite 客户端配置（Clash/Mihomo 格式）自动生成"
     echo "# 若节点使用 IPv6 地址，客户端顶层需要 ipv6: true 才能连通"
@@ -949,8 +949,8 @@ _build_links() {
         psk=$(jq -r '.psk' <<<"$n"); ver=$(jq -r '.version // 4' <<<"$n")
         v6mode=$(jq -r '.v6_mode // ""' <<<"$n")
         obfs=$(jq -r '.obfs // ""' <<<"$n"); obfshost=$(jq -r '.obfs_host // ""' <<<"$n")
-        # 分享链接按 Potatso 的 snell:// 约定(mihomo 自身不解析, Potatso 等客户端可导入);
-        # Clash 系 → clash.yaml; Surge 配置行以注释形式并进 links.txt。v6 的 mode 不在链接里, 需在客户端补
+        # snell:// 按 Potatso 约定生成(mihomo 自身不解析), 单独存 surge-snell.txt 并在查看节点时展示;
+        # Clash 系 → clash.yaml; v6 的 mode 不在链接里, 需在客户端补
         local psk_enc q=""
         psk_enc=$(_url_encode "$psk")
         [ -n "$obfs" ] && q="&obfs=${obfs}&obfs-host=$(_url_encode "$obfshost")"
@@ -960,12 +960,9 @@ _build_links() {
           [ -n "$v6mode" ] && printf '    mode: %s\n' "$v6mode"
           [ -n "$obfs" ] && printf '    obfs-opts:\n      mode: %s\n      host: %s\n' "$obfs" "$obfshost"
         } >> "$yaml_file"
-        {
-          printf '# Surge: %s = snell, %s, %s, psk=%s, version=%s' "$tag" "$host" "$port" "$psk" "$ver"
-          [ -n "$v6mode" ] && printf ', mode=%s' "$v6mode"
-          [ -n "$obfs" ] && printf ', obfs=%s, obfs-host=%s' "$obfs" "$obfshost"
-          printf '\n'
-        } >> "$links_file"
+        echo "$link" >> "$surge_file"
+        # 只放进 snell 专属文件, 不重复写 links.txt
+        link=""
         ;;
       trojan-reality)
         local pass pbk sid sni
@@ -981,7 +978,7 @@ _build_links() {
       vless-ws|vmess-ws|vless-xhttp-argo) [ -n "$link" ] && echo "$link" >> "$argo_file" ;;
     esac
   done
-  chmod 600 "$links_file" "$yaml_file" 2>/dev/null
+  chmod 600 "$links_file" "$yaml_file" "$surge_file" 2>/dev/null
 }
 
 _show_links() {
@@ -999,7 +996,15 @@ _show_links() {
   echo "分享链接文件: ${SUB_DIR}/links.txt"
   echo "Clash/Mihomo 客户端配置: ${SUB_DIR}/clash.yaml"
   if jq -e '[.nodes[]? | select(.proto == "snell")] | length > 0' "$METADATA_FILE" >/dev/null 2>&1; then
-    _info "Snell 的 snell:// 链接按 Potatso 约定生成（mihomo 不解析）；v6 的 mode 不在链接里，客户端需单独配置。Surge 配置行以 # Surge: 注释并排在 links.txt 里。"
+    echo ""
+    echo -e "${CYAN}================ Snell 节点 (snell:// 链接) ================${NC}"
+    if [ -s "${SUB_DIR}/surge-snell.txt" ]; then
+      cat "${SUB_DIR}/surge-snell.txt"
+    else
+      _warn "暂无 snell:// 链接。"
+    fi
+    echo "Snell 链接文件: ${SUB_DIR}/surge-snell.txt"
+    _info "snell:// 按 Potatso 约定生成（mihomo/OpenClash 不解析，用 clash.yaml）；v6 的 mode 不在链接里，客户端需单独配置。"
   fi
   # mieru 节点只有 yaml 配置，没有分享链接，做一次提示
   local has_mieru

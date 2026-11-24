@@ -1,6 +1,6 @@
 # mihomo-lite
 
-> 版本：v1.5.28
+> 版本：v1.5.29
 >
 > **⚠️ 测试阶段（BETA）**：本项目当前处于测试阶段，功能与配置格式可能随时调整，请勿在生产环境使用。
 
@@ -32,7 +32,7 @@ mihomo 内核多协议服务端一键管理脚本。
 | Mieru | TCP/UDP 自研加密，**用户名/密码均随机生成可自定义**，支持**单端口或端口段**（端口跳跃，客户端每条连接随机挑）；无通用分享链接，输出 clash.yaml |
 | Shadowsocks 2022 | blake3 三种加密，严格长度密钥校验 |
 | Trojan + Reality | 无需证书 |
-| Snell | v4 / v5 / v6 可选；v4/v5 支持 `http`/`tls` 混淆，v6 无混淆层、用 PSK 派生流量整形（`mode` 须与客户端一致，需内核 ≥ 1.19.34）；分享链接 `snell://`（Potatso 约定，mihomo 不解析）+ clash.yaml，Surge 配置行以注释并排进 links.txt |
+| Snell | v4 / v5 / v6 可选；v4/v5 支持 `http`/`tls` 混淆，v6 无混淆层、用 PSK 派生流量整形（`mode` 须与客户端一致，需内核 ≥ 1.19.34）；`snell://` 链接（Potatso 约定）单独存 `surge-snell.txt` 并在查看链接时显示，Clash 系用 clash.yaml |
 | VLESS / VMess + WS + Argo | 临时隧道（自动探测域名）或固定隧道（Token） |
 | **VLESS + XHTTP + TLS + Argo** | XHTTP 拆成 HTTP 请求序列，抗探测更强；TLS 只在 CF 边缘终结，为迎合用户需要添加本人不推；默认 `packet-up` + padding；可与 WS 节点**共用同一条固定隧道**（新回源端口 + 新子域名） |
 

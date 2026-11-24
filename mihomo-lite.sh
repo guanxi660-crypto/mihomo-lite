@@ -949,8 +949,12 @@ _build_links() {
         psk=$(jq -r '.psk' <<<"$n"); ver=$(jq -r '.version // 4' <<<"$n")
         v6mode=$(jq -r '.v6_mode // ""' <<<"$n")
         obfs=$(jq -r '.obfs // ""' <<<"$n"); obfshost=$(jq -r '.obfs_host // ""' <<<"$n")
-        # Snell 没有通用分享链接规范(mihomo 也不解析 snell://), 只输出客户端配置:
-        # Clash 系 → clash.yaml; Surge → surge-snell.txt (v6 的实际受众主要是 Surge)
+        # 分享链接按 Potatso 的 snell:// 约定(mihomo 自身不解析, Potatso 等客户端可导入);
+        # Clash 系 → clash.yaml; Surge → surge-snell.txt。v6 的 mode 不在链接里, 需在客户端补
+        local psk_enc q=""
+        psk_enc=$(_url_encode "$psk")
+        [ -n "$obfs" ] && q="&obfs=${obfs}&obfs-host=$(_url_encode "$obfshost")"
+        link="snell://${psk_enc}@${host}:${port}?version=${ver}${q}#${enc_name}"
         {
           printf '  - name: "%s"\n    type: snell\n    server: "%s"\n    port: %s\n    psk: "%s"\n    version: %s\n    udp: true\n' "$(_yaml_q "$tag")" "$ip" "$port" "$(_yaml_q "$psk")" "$ver"
           [ -n "$v6mode" ] && printf '    mode: %s\n' "$v6mode"
@@ -995,7 +999,7 @@ _show_links() {
   echo "分享链接文件: ${SUB_DIR}/links.txt"
   echo "Clash/Mihomo 客户端配置: ${SUB_DIR}/clash.yaml"
   if jq -e '[.nodes[]? | select(.proto == "snell")] | length > 0' "$METADATA_FILE" >/dev/null 2>&1; then
-    _info "Snell 节点无通用分享链接，客户端配置见 clash.yaml；Surge 用户可直接取 ${SUB_DIR}/surge-snell.txt 里的配置行。"
+    _info "Snell 的 snell:// 链接按 Potatso 约定生成（mihomo 不解析）；v6 的 mode 不在链接里，客户端需单独配置。Surge 用户可直接取 ${SUB_DIR}/surge-snell.txt。"
   fi
   # mieru 节点只有 yaml 配置，没有分享链接，做一次提示
   local has_mieru

@@ -32,7 +32,7 @@ mihomo 内核多协议服务端一键管理脚本。
 | Mieru | TCP/UDP 自研加密，**用户名/密码均随机生成可自定义**，支持**单端口或端口段**（端口跳跃，客户端每条连接随机挑）；无通用分享链接，输出 clash.yaml |
 | Shadowsocks 2022 | blake3 三种加密，严格长度密钥校验 |
 | Trojan + Reality | 无需证书 |
-| Snell | v4 / v5 / v6 可选；v4/v5 支持 `http`/`tls` 混淆，v6 无混淆层、用 PSK 派生流量整形（`mode` 须与客户端一致，需内核 ≥ 1.19.34）；`snell://` 链接（Potatso 约定）单独存 `surge-snell.txt` 并在查看链接时显示，Clash 系用 clash.yaml |
+| Snell | v4 / v5 / v6 可选；v4/v5 支持 `http`/`tls` 混淆，v6 无混淆层、用 PSK 派生流量整形（`mode` 须与客户端一致，需内核 ≥ 1.19.34）；`snell://` 链接单独存 `surge-snell.txt`（查看链接时显示）；**和 Mieru 一样，mihomo/OpenClash 不解析分享链接，Clash 系必须取 clash.yaml 的 yaml 配置** |
 | VLESS / VMess + WS + Argo | 临时隧道（自动探测域名）或固定隧道（Token） |
 | **VLESS + XHTTP + TLS + Argo** | XHTTP 拆成 HTTP 请求序列，抗探测更强；TLS 只在 CF 边缘终结，为迎合用户需要添加本人不推；默认 `packet-up` + padding；可与 WS 节点**共用同一条固定隧道**（新回源端口 + 新子域名） |
 
@@ -57,6 +57,7 @@ mihomo 内核多协议服务端一键管理脚本。
 - 重启前 `mihomo -t` 配置校验 + 启动后存活兜底检查
 - SS2022 严格长度密钥校验（避免运行期 `decode psk` 错误）
 - Snell 版本自选：v4（客户端兼容面最广，默认）/ v5 / v6；v6 添加时自动校验内核 ≥ 1.19.34、PSK 长度 12-255 字节并询问 `mode`（default/unshaped/unsafe-raw）
+- Snell 客户端注意：mihomo / OpenClash **不解析 `snell://` scheme**（和 Mieru 一样只能用 yaml 配置），Clash 系直接取 `sub/clash.yaml`；`surge-snell.txt` 里的 `snell://` 链接给 Potatso 或 Surge Mac 6.12+/iOS 6.0+ 的分享链接导入用，v6 的 `mode` 需客户端另行对齐
 
 ## 节点命名
 
